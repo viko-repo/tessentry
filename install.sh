@@ -57,8 +57,8 @@ chmod 750 /mutable/tessentry
 cat >/etc/systemd/system/tessentry-worker.service <<UNIT
 [Unit]
 Description=Tessentry event monitor
-After=network-online.target
-Wants=network-online.target
+After=network-online.target tailscaled.service
+Wants=network-online.target tailscaled.service
 [Service]
 Type=simple
 User=tessentry
