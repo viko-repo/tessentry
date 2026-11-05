@@ -54,7 +54,7 @@ PYI
 fi
 chown -R tessentry:tessentry /mutable/tessentry
 chmod 750 /mutable/tessentry
-cat >/etc/systemd/system/tessentry-worker.service <<'UNIT'
+cat >/etc/systemd/system/tessentry-worker.service <<UNIT
 [Unit]
 Description=Tessentry event monitor
 After=network-online.target
