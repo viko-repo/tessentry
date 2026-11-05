@@ -24,6 +24,9 @@ def db():
     BASE.mkdir(parents=True,exist_ok=True)
     c=sqlite3.connect(BASE/'events.sqlite',timeout=20)
     c.execute('CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, path TEXT, status TEXT, attempts INTEGER DEFAULT 0, error TEXT, updated INTEGER)')
+    cols={r[1] for r in c.execute('PRAGMA table_info(events)')}
+    for name in ('text_sent','video_sent'):
+        if name not in cols: c.execute(f'ALTER TABLE events ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0')
     c.commit(); return c
 
 def status():
@@ -69,36 +72,39 @@ def event_text(folder,meta):
         except (TypeError,ValueError): pass
     return '\n'.join(lines)
 
-def send(cfg,folder,video,meta):
-    """OpenWA WAHA-compatible API endpoint; confirm actual server contract in UI before enabling."""
-    from urllib.parse import quote, urlsplit
-    base=cfg['openwa_url'].rstrip('/')
-    u=urlsplit(base)
-    if u.scheme not in ('http','https') or not u.hostname or u.username or u.password: raise ValueError('Invalid OpenWA URL')
-    # Require Tailscale host by default; LAN use requires explicit opt-in.
+def validate_openwa_url(cfg):
+    """Reject non-Tailnet destinations unless explicitly permitted."""
+    import ipaddress
+    from urllib.parse import urlsplit
+    u=urlsplit(cfg['openwa_url'].rstrip('/'))
+    if u.scheme not in ('http','https') or not u.hostname or u.username or u.password or u.query or u.fragment:
+        raise ValueError('Invalid OpenWA URL')
     if not cfg['allow_non_tailnet']:
-        import ipaddress
-        try:
-            ip=ipaddress.ip_address(u.hostname)
-            if not (ip.version==4 and ip in ipaddress.ip_network('100.64.0.0/10')): raise ValueError('OpenWA URL must be a Tailscale IP')
-        except ValueError as e:
-            if str(e)=='OpenWA URL must be a Tailscale IP': raise
-            raise ValueError('Use a Tailscale IPv4 address or enable LAN override')
+        try: ip=ipaddress.ip_address(u.hostname)
+        except ValueError: raise ValueError('Use a numeric Tailscale IPv4 address')
+        if ip.version!=4 or ip not in ipaddress.ip_network('100.64.0.0/10'):
+            raise ValueError('OpenWA URL must be a Tailscale IPv4 address')
+    return cfg['openwa_url'].rstrip('/')
+
+def send_part(cfg,folder,video,meta,part):
+    """PREVIEW adapter: API route and payload MUST be validated before enabling."""
+    from urllib.parse import quote
+    base=validate_openwa_url(cfg)
     session=quote(cfg['openwa_session'],safe='')
     chat=cfg['openwa_chat_id']
     headers={'X-Api-Key':cfg['openwa_api_key']}
-    # These endpoints are based on common OpenWA/WAHA conventions and MUST be validated against deployed server.
-    if cfg['send_text']:
+    if part=='text':
         body=json.dumps({'chatId':chat,'text':event_text(folder,meta)}).encode()
         req=urllib.request.Request(f'{base}/api/sessions/{session}/messages/send-text',body,{**headers,'Content-Type':'application/json'},method='POST')
         with urllib.request.urlopen(req,timeout=30) as resp: resp.read()
-    if cfg['send_video']:
+    elif part=='video':
         boundary='----Tessentry'+uuid.uuid4().hex
         def field(k,v): return (f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n').encode()
         payload=field('chatId',chat)+field('caption','Tesla Sentry event')
         payload+=(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="event.mp4"\r\nContent-Type: video/mp4\r\n\r\n').encode()+video.read_bytes()+b'\r\n'+f'--{boundary}--\r\n'.encode()
         req=urllib.request.Request(f'{base}/api/sessions/{session}/messages/send-file',payload,{**headers,'Content-Type':'multipart/form-data; boundary='+boundary},method='POST')
         with urllib.request.urlopen(req,timeout=90) as resp: resp.read()
+    else: raise ValueError('Unknown message part')
 
 def scan_once():
     cfg=config()
@@ -107,20 +113,29 @@ def scan_once():
     c=db()
     try:
         for key,folder,video,meta in discover(cfg):
-            row=c.execute('SELECT status,attempts,updated FROM events WHERE id=?',(key,)).fetchone()
-            if row and row[0] in ('sent','sending'): continue
+            row=c.execute('SELECT status,attempts,updated,text_sent,video_sent FROM events WHERE id=?',(key,)).fetchone()
+            if row and row[0] in ('sent','sending','review'): continue
             if row and (row[1]>=10 or (row[2] and time.time()-row[2]<min(3600,60*2**min(row[1],6)))): continue
             attempts=(row[1] if row else 0)+1
-            # A pending state is persisted before delivery to avoid duplicate sends on restart.
-            # On an interrupted delivery, manual review is needed; do not automatically retry uncertain sends.
-            c.execute('INSERT OR REPLACE INTO events VALUES (?,?,?,?,?,?)',(key,str(folder),'sending',attempts,'',int(time.time())));c.commit()
+            text_done=bool(row[3]) if row else False
+            video_done=bool(row[4]) if row else False
+            # Persist 'sending' before any external request. Interrupted calls are
+            # uncertain and require manual review rather than automatic replay.
+            c.execute('INSERT OR REPLACE INTO events (id,path,status,attempts,error,updated,text_sent,video_sent) VALUES (?,?,?,?,?,?,?,?)',
+                      (key,str(folder),'sending',attempts,'',int(time.time()),int(text_done),int(video_done)))
+            c.commit()
             try:
-                send(cfg,folder,video,meta)
+                for part,enabled,done in (('text',cfg['send_text'],text_done),('video',cfg['send_video'],video_done)):
+                    if enabled and not done:
+                        send_part(cfg,folder,video,meta,part)
+                        c.execute(f'UPDATE events SET {part}_sent=1,updated=? WHERE id=?',(int(time.time()),key)); c.commit()
                 c.execute('UPDATE events SET status=?,error=?,updated=? WHERE id=?',('sent','',int(time.time()),key));c.commit()
                 LOG.info('Sent event %s',folder)
             except Exception as e:
-                c.execute('UPDATE events SET status=?,error=?,updated=? WHERE id=?',('failed',str(e)[:300],int(time.time()),key));c.commit()
-                LOG.exception('Delivery failed: %s',folder)
+                # Request may have been accepted remotely despite timeout. Hold for
+                # review instead of automatically retrying an uncertain delivery.
+                c.execute('UPDATE events SET status=?,error=?,updated=? WHERE id=?',('review',str(e)[:300],int(time.time()),key));c.commit()
+                LOG.exception('Delivery needs review: %s',folder)
     finally: c.close()
 
 def worker():

@@ -1,6 +1,6 @@
 # Tessentry 🚗
 
-**Tessentry v0.1.0 — early preview / not yet validated against your OpenWA deployment.**
+**Tessentry v0.1.1 — early preview / not yet validated against your OpenWA deployment.**
 
 Tessentry monitors TeslaCam `SentryClips` and `SavedClips` event folders on a Sentry-USB-Rusty Raspberry Pi and can send `event.mp4` plus `event.json` metadata to an OpenWA/WAHA-compatible WhatsApp API over Tailscale.
 
@@ -12,10 +12,10 @@ Tessentry monitors TeslaCam `SentryClips` and `SavedClips` event folders on a Se
 - Watches folders you configure. The default `/mutable/TeslaCam/...` paths are **not proven to be the final archived paths**. Confirm them using a real archived event.
 - An event is eligible only after `event.mp4` exists and has an old enough modification time. This is a heuristic, **not** an archive completion guarantee.
 - Only folders containing `event.mp4` are sent. Missing `event.json` is allowed.
-- A partially successful text+video send can result in duplicate text on retry. Interrupted `sending` states are held for manual review; retry management is not yet available in the UI.
+- Text/video completion is recorded independently. Failed or interrupted deliveries are held for manual review (no unsafe automatic replay). The UI does not yet offer manual retry controls.
 - The multipart `send-file` and JSON `send-text` routes are **assumptions** based on common OpenWA conventions, not validated against your server. Adapt `tessentry/core.py:send` after checking your server's API.
-- Password-protected web UI is plain HTTP. Access it **only from a trusted LAN or Tailscale**, preferably through an encrypted proxy. Do not expose TCP 8788 to the Internet. No automatic firewall restrictions are installed.
-- No health claims for remote OpenWA/Tailscale are made in the UI. It shows local folder and event status.
+- Password-protected web UI is plain HTTP. Access it **only from a trusted LAN or Tailscale**, preferably through an encrypted proxy. Do not expose TCP 8788 to the Internet. The installer binds the UI **only to the current Tailscale IPv4 address**; no firewall rules are changed. If the Tailscale IP changes, reinstall to refresh the binding.
+- The UI shows Tailscale IP availability and an OpenWA TCP reachability probe, not an authenticated API health check. Worker health must still be checked with systemctl.
 
 ## Install from a Git checkout
 
@@ -31,7 +31,7 @@ This is the intended one-command installer **after checkout**; a future release 
 
 The installer checks that `/mutable` is mounted and writable, temporarily remounts `/` writable if needed (preferring `/root/bin/remountfs_rw`), installs Python-only code and systemd units, and restores read-only root on exit. It does not install Python packages. The installer displays a generated admin password **once**; save it securely. Subsequent runs retain the existing password and configuration.
 
-Open `http://<PI-LAN-IP>:8788/tessentry/`, sign in, and configure OpenWA and event folders. Default monitoring: **off**. Service updates take effect at the next scan.
+Open `http://<PI-TAILSCALE-IP>:8788/tessentry/`, sign in, and configure OpenWA and event folders. Default monitoring: **off**. Service updates take effect at the next scan.
 
 ## OpenWA integration
 
@@ -70,7 +70,14 @@ Create a `password.hash` in the data folder using `tessentry.web.hash_password(.
 - Validate real OpenWA routes and end-to-end video delivery.
 - Verify final SentryUSB archive folder and reliable completion signals.
 - Per-channel send state, safe retries, and manual requeue.
-- Harden UI transport (HTTPS), network restrictions, and status/health checks.
+- Add HTTPS and authenticated OpenWA API health checks; validate Tailnet IP binding on network changes.
 - Unit and integration tests with recorded fixtures.
 
 License: MIT.
+
+## v0.1.1 security notes
+
+- Installer restores both root and boot RO states, reports cleanup failure and refuses installation without an active Tailscale IP.
+- Web UI binds only to the Tailscale IP, not `0.0.0.0`. Traffic remains plain HTTP inside the tailnet.
+- OpenWA routes are **not verified**: leave monitoring disabled until tested with a non-production destination.
+- Event delivery records text and video separately and holds ambiguous failures for review.

@@ -1,9 +1,9 @@
 """Small password-protected management UI, no external Python dependencies."""
-import os,json,html,secrets,hashlib,hmac,threading,time,logging
+import os,json,html,secrets,hashlib,hmac,threading,time,logging,socket,subprocess
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from urllib.parse import parse_qs,urlparse
-from .core import BASE,config,save_config,status,db
+from .core import BASE,config,save_config,status,db,validate_openwa_url
 SESS={}; LOCK=threading.Lock()
 
 def hash_password(p,salt=None):
@@ -56,9 +56,24 @@ class Handler(BaseHTTPRequestHandler):
             st=status(); c=config(); conn=db(); rows=conn.execute('SELECT path,status,attempts,error,updated FROM events ORDER BY updated DESC LIMIT 20').fetchall();conn.close()
             s='<h2>Status</h2><p>Monitoring: <b>'+('enabled' if c['enabled'] else 'disabled')+'</b></p><p>OpenWA configured: '+('yes' if all(c.get(k) for k in ('openwa_url','openwa_api_key','openwa_session','openwa_chat_id')) else 'no')+'</p><p>Events: '+esc(st['counts'])+'</p><h3>Watched folders</h3>'
             for x in st['folders']:s+='<p>'+esc(x['path'])+' — '+('available' if x['exists'] else 'missing')+'</p>'
+            # Local health probes only; never send API keys to a status endpoint.
+            try:
+                ts=subprocess.run(['/usr/bin/tailscale','ip','-4'],capture_output=True,text=True,timeout=3)
+                tailnet='available' if ts.returncode==0 and ts.stdout.strip() else 'unavailable'
+            except (OSError,subprocess.TimeoutExpired): tailnet='unavailable'
+            s+='<p>Tailscale: '+tailnet+'</p>'
+            try:
+                from urllib.parse import urlsplit
+                validate_openwa_url(c)
+                target=urlsplit(c['openwa_url']); port=target.port or (443 if target.scheme=='https' else 80)
+                with socket.create_connection((target.hostname,port),timeout=2): pass
+                openwa='TCP reachable (API not verified)'
+            except Exception: openwa='unreachable or not configured'
+            s+='<p>OpenWA: '+esc(openwa)+'</p>'
+            s+='<p>Worker: check systemctl tessentry-worker (web process cannot attest to worker health)</p>'
             s+='<h3>Recent events</h3>'
             for r in rows:s+='<p>'+esc(r[1])+' · '+esc(r[0])+' · attempts '+esc(r[2])+' '+esc(r[3])+'</p>'
-            s+='<p><small>Service/Tailscale connectivity should be checked separately via systemctl and tailscale status.</small></p>'
+            s+='<p><small>Events in review require manual inspection; no automatic retry.</small></p>'
             return self.send(page('Status',s))
         self.send(page('Not found','Not found'),404)
     def do_POST(self):
@@ -93,5 +108,5 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     logging.basicConfig(level=logging.INFO)
-    host=os.environ.get('TESSENTRY_BIND','0.0.0.0');port=int(os.environ.get('TESSENTRY_PORT','8788'))
+    host=os.environ.get('TESSENTRY_BIND','127.0.0.1');port=int(os.environ.get('TESSENTRY_PORT','8788'))
     ThreadingHTTPServer((host,port),Handler).serve_forever()

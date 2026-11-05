@@ -9,26 +9,31 @@ mountpoint -q /mutable || { echo 'ERROR: /mutable is not mounted; refusing insta
 [[ -w /mutable ]] || { echo 'ERROR: /mutable not writable'; exit 1; }
 INITIAL_ROOT_OPTS="$(findmnt -no OPTIONS /)"
 INITIAL_BOOT_OPTS="$(findmnt -no OPTIONS /boot/firmware)"
-ROOT_WAS_RO=0
+ROOT_WAS_RO=0; BOOT_WAS_RO=0
 [[ ",$INITIAL_ROOT_OPTS," == *,ro,* ]] && ROOT_WAS_RO=1
-restore_ro() {
-  if (( ROOT_WAS_RO )); then
-    mount -o remount,ro / || echo 'WARNING: failed to restore read-only root; check manually' >&2
-  fi
-}
-trap restore_ro EXIT
-if (( ROOT_WAS_RO )); then
-  # SentryUSB helper is preferred if present, but may also remount boot; restore below.
-  if [[ -x /root/bin/remountfs_rw ]]; then /root/bin/remountfs_rw; else mount -o remount,rw /; fi
-fi
-# Do not change boot mount state unless helper did.
-BOOT_WAS_RO=1
-[[ ",$INITIAL_BOOT_OPTS," == *,rw,* ]] && BOOT_WAS_RO=0
+[[ ",$INITIAL_BOOT_OPTS," == *,ro,* ]] && BOOT_WAS_RO=1
 cleanup() {
-  if (( BOOT_WAS_RO )); then mount -o remount,ro /boot/firmware 2>/dev/null || true; fi
-  restore_ro
+  local rc=$?; trap - EXIT
+  if (( BOOT_WAS_RO )); then
+    if ! mount -o remount,ro /boot/firmware; then
+      echo 'CRITICAL: boot filesystem could not be restored to read-only' >&2; rc=1
+    fi
+  fi
+  if (( ROOT_WAS_RO )); then
+    if ! mount -o remount,ro /; then
+      echo 'CRITICAL: root filesystem could not be restored to read-only' >&2; rc=1
+    fi
+  fi
+  exit "$rc"
 }
 trap cleanup EXIT
+if (( ROOT_WAS_RO )); then
+  if [[ -x /root/bin/remountfs_rw ]]; then /root/bin/remountfs_rw; else mount -o remount,rw /; fi
+fi
+# Fail closed: no world-accessible admin UI. Bind to the local Tailscale IPv4.
+command -v tailscale >/dev/null || { echo 'Tailscale is required for the management UI' >&2; exit 1; }
+TAILSCALE_IP="$(tailscale ip -4 | head -n1)"
+[[ "$TAILSCALE_IP" =~ ^100\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'No active Tailscale IPv4 address' >&2; exit 1; }
 if ! id tessentry >/dev/null 2>&1; then useradd --system --home-dir /mutable/tessentry --shell /usr/sbin/nologin tessentry; fi
 install -d -m 750 -o tessentry -g tessentry /mutable/tessentry
 install -d -m 755 /opt/tessentry
@@ -81,7 +86,7 @@ User=tessentry
 Group=tessentry
 Environment=PYTHONPATH=/opt/tessentry
 Environment=TESSENTRY_DATA=/mutable/tessentry
-Environment=TESSENTRY_BIND=0.0.0.0
+Environment=TESSENTRY_BIND=${TAILSCALE_IP}
 Environment=TESSENTRY_PORT=8788
 ExecStart=/usr/bin/python3 -m tessentry web
 Restart=always
@@ -95,5 +100,5 @@ WantedBy=multi-user.target
 UNIT
 systemctl daemon-reload
 systemctl enable --now tessentry-worker.service tessentry-web.service
-printf '\nInstalled. Monitoring is OFF until configured. Open http://<PI-IP>:8788/tessentry/\n'
-printf 'SECURITY: HTTP is not encrypted. Use trusted LAN or Tailscale only; do not port-forward 8788.\n'
+printf '\nInstalled. Monitoring is OFF until configured. Open http://${TAILSCALE_IP}:8788/tessentry/\n'
+printf 'SECURITY: UI listens only on the Tailscale IP; HTTP is not encrypted. Do not port-forward.\n'
