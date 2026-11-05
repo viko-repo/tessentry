@@ -1,6 +1,6 @@
 # Tessentry 🚗
 
-**Tessentry v0.1.1 — early preview / not yet validated against your OpenWA deployment.**
+**Tessentry v0.1.2 — early preview / not yet validated against your OpenWA deployment.**
 
 Tessentry monitors TeslaCam `SentryClips` and `SavedClips` event folders on a Sentry-USB-Rusty Raspberry Pi and can send `event.mp4` plus `event.json` metadata to an OpenWA/WAHA-compatible WhatsApp API over Tailscale.
 
@@ -75,9 +75,14 @@ Create a `password.hash` in the data folder using `tessentry.web.hash_password(.
 
 License: MIT.
 
-## v0.1.1 security notes
+## v0.1.2 security notes
 
 - Installer restores both root and boot RO states, reports cleanup failure and refuses installation without an active Tailscale IP.
 - Web UI binds only to the Tailscale IP, not `0.0.0.0`. Traffic remains plain HTTP inside the tailnet.
 - OpenWA routes are **not verified**: leave monitoring disabled until tested with a non-production destination.
 - Event delivery records text and video separately and holds ambiguous failures for review.
+
+
+## v0.1.2 installer fix
+
+Fix systemd TESSENTRY_BIND interpolation and print the actual Tailscale URL. Installation on the target SentryUSB device and OpenWA media API remain unvalidated; do not enable monitoring until verified.

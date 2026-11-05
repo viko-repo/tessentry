@@ -75,7 +75,7 @@ PrivateTmp=true
 [Install]
 WantedBy=multi-user.target
 UNIT
-cat >/etc/systemd/system/tessentry-web.service <<'UNIT'
+cat >/etc/systemd/system/tessentry-web.service <<UNIT
 [Unit]
 Description=Tessentry management UI
 After=network-online.target
@@ -100,5 +100,5 @@ WantedBy=multi-user.target
 UNIT
 systemctl daemon-reload
 systemctl enable --now tessentry-worker.service tessentry-web.service
-printf '\nInstalled. Monitoring is OFF until configured. Open http://${TAILSCALE_IP}:8788/tessentry/\n'
+printf '\nInstalled. Monitoring is OFF until configured. Open http://%s:8788/tessentry/\n' "$TAILSCALE_IP"
 printf 'SECURITY: UI listens only on the Tailscale IP; HTTP is not encrypted. Do not port-forward.\n'
