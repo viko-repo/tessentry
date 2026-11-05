@@ -185,7 +185,6 @@ Environment=PYTHONPATH=/opt/tessentry
 Environment=TESSENTRY_DATA=/mutable/tessentry
 Environment=TESSENTRY_BIND=${TAILSCALE_IP}
 Environment=TESSENTRY_PORT=8788
-ExecStartPre=/bin/sh -c 'until /usr/sbin/ip -4 addr show | /bin/grep -Fq "${TAILSCALE_IP}/"; do /bin/sleep 2; done'
 ExecStart=/usr/bin/python3 -m tessentry web
 TimeoutStartSec=120
 Restart=always
