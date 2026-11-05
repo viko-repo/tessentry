@@ -78,8 +78,8 @@ UNIT
 cat >/etc/systemd/system/tessentry-web.service <<UNIT
 [Unit]
 Description=Tessentry management UI
-After=network-online.target
-Wants=network-online.target
+After=network-online.target tailscaled.service
+Wants=network-online.target tailscaled.service
 [Service]
 Type=simple
 User=tessentry
