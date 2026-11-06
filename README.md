@@ -1,8 +1,8 @@
 # Tessentry 🚗
 
-**Tesla Sentry events → WhatsApp notifications, powered by Sentry-USB-Rusty, Tailscale and OpenWA.**
+**Tesla Sentry events → WhatsApp (OpenWA), Telegram, or both — powered by Sentry-USB-Rusty and Tailscale.**
 
-Tessentry is a lightweight companion service for a Raspberry Pi running [Sentry-USB-Rusty](https://github.com/Sentry-Six/Sentry-USB-Rusty). It watches configured TeslaCam `SentryClips` and `SavedClips` event folders and sends event information, a short `event.mp4` clip, and an optional native WhatsApp location message through OpenWA.
+Tessentry is a lightweight companion service for a Raspberry Pi running [Sentry-USB-Rusty](https://github.com/Sentry-Six/Sentry-USB-Rusty). It watches configured TeslaCam `SentryClips` and `SavedClips` event folders and sends event details and a short `event.mp4` clip to WhatsApp (via OpenWA), Telegram, or both. WhatsApp can receive a separate native location message; Telegram includes a clickable Google Maps link in the video caption (or text message when video is disabled), when valid coordinates are available.
 
 > **Start here: install Sentry-USB-Rusty first.** Tessentry is an add-on, not a replacement for the Tesla USB recorder or archive system. If Sentry-USB-Rusty is already installed and working, **do not reinstall it**.
 
@@ -11,8 +11,8 @@ Tessentry is a lightweight companion service for a Raspberry Pi running [Sentry-
 | Step | Component | Purpose |
 | --- | --- | --- |
 | **1** | **[Sentry-USB-Rusty](https://github.com/Sentry-Six/Sentry-USB-Rusty)** | Tesla USB recording, event storage and archiving — **required first** |
-| 2 | [Tailscale](https://tailscale.com/) | Private connectivity between the Raspberry Pi and OpenWA |
-| 3 | OpenWA / compatible WhatsApp API | Send WhatsApp notifications and video |
+| 2 | [Tailscale](https://tailscale.com/) | Private connectivity to the Raspberry Pi and, when used, the OpenWA server |
+| 3 | OpenWA and/or a Telegram bot | Configure the notification destination(s) you intend to use |
 | 4 | **Tessentry** | Monitor new Sentry events and provide a configuration UI |
 
 ### Step 1 — Install Sentry-USB-Rusty (required)
@@ -30,9 +30,13 @@ Follow the **[official Sentry-USB-Rusty installation instructions](https://githu
 
 Install and authenticate Tailscale on the Raspberry Pi and on the host running OpenWA. Verify that the Pi can reach the OpenWA server across your tailnet. Tessentry's installer expects Tailscale to be installed and running and binds the web interface to the Pi's current Tailscale IPv4 address.
 
-### Step 3 — Prepare OpenWA
+### Step 3 — Prepare notification providers
 
-Set up an OpenWA/compatible WhatsApp API server and verify that it can send a message to a **test** chat or group. Have its server URL, session, API key (if required), and target chat/group ID ready. Never put these credentials in GitHub.
+**WhatsApp (optional):** Set up an OpenWA/compatible WhatsApp API server and verify that it can send a message to a **test** chat or group. Have its server URL, session, API key (if required), and target chat/group ID ready.
+
+**Telegram (optional):** Create a bot with [@BotFather](https://t.me/BotFather), start a conversation with the bot or add it to the intended group/channel, and obtain the destination Chat ID. The Raspberry Pi must be able to reach the Telegram Bot API over HTTPS.
+
+You can configure WhatsApp, Telegram, or both. Never put credentials or chat IDs in GitHub.
 
 ### Step 4 — Install Tessentry on the Raspberry Pi
 
@@ -56,7 +60,7 @@ Open the web interface from a device on your tailnet:
 http://<PI-TAILSCALE-IP>:8788/tessentry/
 ```
 
-Sign in with the installation password, then configure the OpenWA server URL, session, API key, target chat/group ID and the TeslaCam event folders. Confirm the paths match your installation. Test delivery to a non-production WhatsApp destination before enabling monitoring.
+Sign in with the installation password, select **WhatsApp (OpenWA)**, **Telegram Bot**, or **WhatsApp + Telegram**, and configure the credentials and destination for each selected provider. Set the TeslaCam event folders and confirm that the paths match your installation. Test delivery to non-production destinations before enabling monitoring.
 
 **Monitoring is disabled by default on a new installation.** Enabling it is an explicit configuration choice. Tessentry keeps an initial baseline to avoid sending old archived events as new alerts.
 
@@ -64,8 +68,11 @@ Sign in with the installation password, then configure the OpenWA server URL, se
 
 - Detects new events in configured `SentryClips` and `SavedClips` folders.
 - Reads `event.json` when present for time, location, reason and camera details.
-- Sends event details and an H.264-compatible `event.mp4` through the tested OpenWA integration.
-- Can send a native WhatsApp location message separately from the video.
+- Sends event details and an H.264-compatible `event.mp4` to WhatsApp through OpenWA, Telegram, or both.
+- WhatsApp can receive a separate native location message after the video.
+- Telegram embeds a clickable Google Maps link in the video caption (or text message if video is disabled), without sending a second location message.
+- English and Hebrew notifications use the existing `tessentry/locales/en.json` and `he.json` translations, including the map-link label.
+- Tracks delivery separately for each selected provider.
 - Password-protected web UI for settings and status.
 - SQLite-backed event tracking to avoid duplicate sends.
 - Keeps Tessentry configuration and history under `/mutable/tessentry`.
@@ -89,18 +96,20 @@ After entering the correct password, Tessentry confirms the session. Click **Ope
 
 ### 3. Check the initial status
 
-Before configuration, **Monitoring: disabled** and **OpenWA configured: no** are expected. Check that the watched Sentry event folders and Tailscale are available.
+Before configuration, **Monitoring: disabled** is expected. The current Status page also reports the selected notification provider and whether OpenWA and Telegram are configured. Check that the watched Sentry event folders and Tailscale are available.
 
 ![Tessentry initial status before OpenWA configuration](docs/images/03-initial-system-status.jpeg)
 
-### 4. Enter the OpenWA and event settings
+### 4. Enter notification provider and event settings
 
-Open **Settings** and enter your own values:
+Open **Settings**, select the notification provider (**WhatsApp**, **Telegram**, or **both**), and enter your own values:
 
-- **OpenWA base URL:** Your OpenWA server address and port, preferably reachable over Tailscale.
+- **OpenWA base URL (when using WhatsApp):** Your OpenWA server address and port, preferably reachable over Tailscale.
 - **OpenWA session:** The session identifier configured on your OpenWA server.
 - **WhatsApp chat/group ID:** The destination for notifications.
 - **OpenWA API key:** The key required by your server, if applicable. When editing an existing configuration, leaving this blank retains the current key.
+- **Telegram Bot Token (when using Telegram):** The token issued by BotFather. Leaving this blank during an edit retains the configured token.
+- **Telegram Chat ID:** The target numeric chat ID or supported public channel username.
 - **Event folders:** The actual `SentryClips` and `SavedClips` archive paths on your Sentry-USB-Rusty installation.
 - **Notification options:** Language, event details, video delivery and monitoring.
 - **Timing:** Minimum event-file age and scan interval.
@@ -111,15 +120,17 @@ Click **Save settings**. Verify connectivity and test message delivery before en
 
 ### 5. Verify the configured status
 
-Return to **Status** after saving. When monitoring has been enabled and the integration configured, the page should report **Monitoring: enabled**, **OpenWA configured: yes**, available event folders and Tailscale connectivity.
+Return to **Status** after saving. When monitoring has been enabled, the page should report **Monitoring: enabled**, the selected notification provider, configuration status for OpenWA and Telegram, available event folders and Tailscale connectivity. Only the selected provider(s) must be configured.
 
 **Important:** **OpenWA: TCP reachable (API not verified)** only confirms that the network port responds. It does not prove authenticated API access or successful WhatsApp delivery. Check `tessentry-worker` separately if needed.
 
 ![Tessentry configured status with monitoring enabled](docs/images/05-configured-system-status.jpg)
 
-### 6. Real WhatsApp notification — manual test
+### 6. Real notification — manual delivery tests
 
-This is a real notification delivered through OpenWA during a manual end-to-end test. It contains a short `event.mp4` clip and event details (date, time, reason and camera), followed by a separate native WhatsApp location card. The video and map are obscured for privacy. **Automatic unattended delivery from a newly archived Tesla event is still awaiting real-world validation.**
+The screenshot shows a real WhatsApp notification delivered through OpenWA during a manual end-to-end test. It contains a short `event.mp4` clip and event details (date, time, reason and camera), followed by a separate native WhatsApp location card. The video and map are obscured for privacy.
+
+A later manual dual-provider test succeeded for both WhatsApp and Telegram. In Telegram, the event is delivered as a single video message with event details and a localized, clickable Google Maps link in its caption; no separate Telegram map message is sent. **Automatic unattended delivery from a newly archived Tesla event is still awaiting real-world validation.**
 
 ![Actual Tessentry WhatsApp notification with video and map obscured](docs/images/06-real-whatsapp-notification.jpg)
 
@@ -169,6 +180,8 @@ python3 -m unittest discover -s tests -v
 | Hebrew WhatsApp text notification | Tested manually |
 | H.264 video delivery | Tested manually |
 | Native WhatsApp location message | Tested manually |
+| Telegram video with localized clickable map link (no separate map message) | Tested manually |
+| Manual delivery to WhatsApp and Telegram in one test | Tested manually |
 | SQLite deduplication and initial baseline | Tested |
 | Automatic monitoring on development Pi | Enabled |
 | Fully unattended delivery from a newly archived real Tesla event | **Awaiting real-world validation** |
@@ -189,7 +202,7 @@ Tessentry supports **WhatsApp (OpenWA)**, **Telegram**, or **both**. Existing in
 3. Open **Tessentry → Settings**, select **Telegram Bot** or **WhatsApp + Telegram**, and enter the **Bot Token** and **Chat ID**. The token is stored locally and is not displayed again.
 4. Save settings and check **Status**. Enable monitoring only when all selected providers are configured.
 
-Each event is sent as a video with event details (or as text if video is disabled), followed by a native location message when valid coordinates are available. Telegram Bot API uploads are limited to **50 MB** for this integration; larger videos are held for review rather than silently dropped. The current implementation uses the public Telegram Bot API over HTTPS, so the Raspberry Pi must have internet access.
+Each Telegram event is sent as a video with event details (or as text if video is disabled). When valid coordinates are available, the message includes a clickable Google Maps link with a localized label from `tessentry/locales/en.json` or `he.json`; **Telegram does not send a separate native location message**. WhatsApp retains its separate native location message. Telegram Bot API uploads are limited to **50 MB** for this integration; larger videos are held for review rather than silently dropped. The current implementation uses the public Telegram Bot API over HTTPS, so the Raspberry Pi must have internet access.
 
 ### Upgrading an existing installation
 
@@ -197,7 +210,7 @@ Keep a separate copy of `/mutable/tessentry/config.json`, `/mutable/tessentry/ev
 
 Delivery is tracked per provider. A successful WhatsApp notification will not be repeated when Telegram fails during the same event. Ambiguous network failures are placed in **review** and are not automatically retried, to prevent duplicates. Historical events already marked **sent** are never replayed merely because a new provider is enabled.
 
-**Validation:** Offline automated tests cover Telegram payloads, provider selection, legacy configuration, location handling and dual-provider progress. Live Telegram Bot API delivery and upgrade on the target Sentry-USB-Rusty device must still be tested with your own bot before relying on it.
+**Validation:** Offline automated tests cover Telegram payloads, provider selection, legacy configuration, location handling and dual-provider progress. Manual live delivery of a test event to both Telegram and WhatsApp has succeeded on the target Raspberry Pi. A fresh GitHub installation and fully unattended delivery from a newly archived Tesla event still require independent validation.
 
 ## Updating an existing installation
 
