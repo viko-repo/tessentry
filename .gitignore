@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# Local tools and downloaded binaries
+/tools/
+
+# Backups and temporary files
+*.before-h264
+*.bak-*
+*.installed-backup
+*.tmp
+*.log
+
+# Private configuration and credentials
+config.json
+password.hash
+.env
+.env.*
+*.sqlite
+*.sqlite3
+
+# Tesla Sentry recordings
+TeslaCam/
+SentryClips/
+SavedClips/
+event.mp4
+event.json
+*.mp4
