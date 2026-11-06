@@ -179,3 +179,36 @@ python3 -m unittest discover -s tests -v
 Tessentry builds on the recording and archiving functionality of **[Sentry-USB-Rusty by Sentry-Six](https://github.com/Sentry-Six/Sentry-USB-Rusty)**. Please follow and support the upstream project. Sentry-USB-Rusty has its own license and installation requirements; Tessentry's repository contains its own MIT license.
 
 **Tessentry license:** MIT — see [LICENSE](LICENSE).
+
+## Telegram notifications (optional)
+
+Tessentry supports **WhatsApp (OpenWA)**, **Telegram**, or **both**. Existing installations default to WhatsApp, and existing `config.json` and event history are retained during an upgrade.
+
+1. Create a Telegram bot using [@BotFather](https://t.me/BotFather), and keep its token private.
+2. Start a chat with your bot, or add it to a group/channel with permission to post. Obtain the destination's numeric **Chat ID** (or a public `@channelusername` where applicable).
+3. Open **Tessentry → Settings**, select **Telegram Bot** or **WhatsApp + Telegram**, and enter the **Bot Token** and **Chat ID**. The token is stored locally and is not displayed again.
+4. Save settings and check **Status**. Enable monitoring only when all selected providers are configured.
+
+Each event is sent as a video with event details (or as text if video is disabled), followed by a native location message when valid coordinates are available. Telegram Bot API uploads are limited to **50 MB** for this integration; larger videos are held for review rather than silently dropped. The current implementation uses the public Telegram Bot API over HTTPS, so the Raspberry Pi must have internet access.
+
+### Upgrading an existing installation
+
+Keep a separate copy of `/mutable/tessentry/config.json`, `/mutable/tessentry/events.sqlite` (including its SQLite WAL files if present), and `/mutable/tessentry/password.hash` before upgrading. On the Raspberry Pi, extract the release and run `sudo bash install.sh`. The installer keeps existing settings, credentials and history, backs up the previous installed application code under `/mutable/tessentry/upgrade-backups`, and restarts the worker and web services. **Do not remove `/mutable/tessentry` or reset the baseline.**
+
+Delivery is tracked per provider. A successful WhatsApp notification will not be repeated when Telegram fails during the same event. Ambiguous network failures are placed in **review** and are not automatically retried, to prevent duplicates. Historical events already marked **sent** are never replayed merely because a new provider is enabled.
+
+**Validation:** Offline automated tests cover Telegram payloads, provider selection, legacy configuration, location handling and dual-provider progress. Live Telegram Bot API delivery and upgrade on the target Sentry-USB-Rusty device must still be tested with your own bot before relying on it.
+
+## Updating an existing installation
+
+Download the latest release ZIP from this repository, extract it, and run `sudo bash update.sh` from the extracted project directory on your Raspberry Pi. The updater validates Python syntax, backs up existing code and persistent state under `/mutable/tessentry/upgrade-backups/`, installs the new code, and checks both systemd services. It preserves `/mutable/tessentry/config.json`, the admin password and the event database. If a service fails to start, the previous application code is restored. The updater restores the original read-only filesystem mount state. **This is an offline updater for an already-downloaded release, not yet a one-command network updater.**
+
+### One-command GitHub update
+
+After publishing `update.sh` and `update-from-github.sh` on the `main` branch, existing installations can fetch and install the current main branch with:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/viko-repo/tessentry/main/update-from-github.sh | sudo bash
+```
+
+**Security:** This executes code from the repository's current `main` branch with root privileges. Only use it if you trust the repository and its maintainers. For reproducible deployments, download and inspect a tagged release instead. Keep a separate off-device backup of your `/mutable/tessentry/` data. This updater does not upgrade OS packages, FFmpeg, or systemd unit definitions.

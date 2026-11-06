@@ -113,6 +113,13 @@ install -d -m 750 -o tessentry -g tessentry /mutable/tessentry
 install -d -m 755 /opt/tessentry
 
 echo "Installing Tessentry application..."
+# Keep an on-device copy of the previous application for manual rollback.
+if [[ -d /opt/tessentry/tessentry ]]; then
+  install -d -m 700 /mutable/tessentry/upgrade-backups
+  BACKUP_FILE="/mutable/tessentry/upgrade-backups/tessentry-code-$(date +%Y%m%d-%H%M%S).tar.gz"
+  tar -czf "$BACKUP_FILE" -C /opt/tessentry tessentry
+  echo "Previous code backup: $BACKUP_FILE"
+fi
 
 cp -a "$SRC/tessentry" /opt/tessentry/
 
@@ -208,14 +215,18 @@ UNIT
 echo "Enabling Tessentry services..."
 
 systemctl daemon-reload
-systemctl enable --now tessentry-worker.service tessentry-web.service
+systemctl enable tessentry-worker.service tessentry-web.service
+# --now does not restart services that are already running after an upgrade.
+systemctl restart tessentry-worker.service tessentry-web.service
+systemctl is-active --quiet tessentry-worker.service
+systemctl is-active --quiet tessentry-web.service
 
 echo
 echo "=============================================="
 echo "TESSENTRY INSTALLATION COMPLETED"
 echo "=============================================="
 printf 'Management UI: http://%s:8788/tessentry/\n' "$TAILSCALE_IP"
-echo "Monitoring remains OFF until configured."
+echo "Existing monitoring settings were preserved; new installations start disabled."
 echo "Services are enabled for automatic startup."
 echo "A controlled reboot is recommended."
 echo "Do not expose port 8788 to the public Internet."

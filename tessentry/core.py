@@ -3,7 +3,7 @@ import json, os, time, sqlite3, hashlib, urllib.request, urllib.error, mimetypes
 from pathlib import Path
 
 BASE=Path(os.environ.get('TESSENTRY_DATA','/mutable/tessentry'))
-DEFAULTS={'enabled':False,'scan_interval_seconds':30,'settle_seconds':90,'folders':['/mutable/TeslaCam/SentryClips','/mutable/TeslaCam/SavedClips'],'openwa_url':'','openwa_api_key':'','openwa_session':'','openwa_chat_id':'','send_video':True,'send_text':True,'notification_language':'en','allow_non_tailnet':False}
+DEFAULTS={'enabled':False,'scan_interval_seconds':30,'settle_seconds':90,'folders':['/mutable/TeslaCam/SentryClips','/mutable/TeslaCam/SavedClips'],'openwa_url':'','openwa_api_key':'','openwa_session':'','openwa_chat_id':'','send_video':True,'send_text':True,'notification_language':'en','allow_non_tailnet':False,'notification_provider':'whatsapp','telegram_bot_token':'','telegram_chat_id':''}
 LOG=logging.getLogger('tessentry')
 
 def config():
@@ -27,6 +27,7 @@ def db():
     cols={r[1] for r in c.execute('PRAGMA table_info(events)')}
     for name in ('text_sent','video_sent','location_sent'):
         if name not in cols: c.execute(f'ALTER TABLE events ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0')
+    c.execute('CREATE TABLE IF NOT EXISTS deliveries (event_id TEXT NOT NULL, provider TEXT NOT NULL, part TEXT NOT NULL, status TEXT NOT NULL, PRIMARY KEY(event_id,provider,part))')
     c.commit(); return c
 
 def status():
@@ -330,68 +331,154 @@ def send_location(cfg, meta):
 
     return True
 
+
+
+def selected_providers(cfg):
+    value=cfg.get('notification_provider','whatsapp')
+    if value not in ('whatsapp','telegram','both'):
+        raise ValueError('Invalid notification provider')
+    return ('whatsapp','telegram') if value=='both' else (value,)
+
+
+def provider_configured(cfg, provider):
+    keys = ('openwa_url','openwa_api_key','openwa_session','openwa_chat_id') if provider=='whatsapp' else ('telegram_bot_token','telegram_chat_id')
+    return all(isinstance(cfg.get(k),str) and cfg[k].strip() for k in keys)
+
+
+def telegram_request(cfg, method, fields, video=None):
+    """Send a Telegram Bot API request. No third-party dependencies or token logging."""
+    import re
+    token=cfg.get('telegram_bot_token','').strip()
+    if not re.fullmatch(r'[0-9]{5,15}:[A-Za-z0-9_-]{20,}',token):
+        raise ValueError('Invalid Telegram bot token format')
+    chat=cfg.get('telegram_chat_id','').strip()
+    if not chat or len(chat)>128 or not re.fullmatch(r'[-@A-Za-z0-9_]+',chat):
+        raise ValueError('Invalid Telegram chat ID')
+    fields={'chat_id':chat,**fields}
+    if video is None:
+        body=json.dumps(fields,ensure_ascii=False).encode('utf-8')
+        content_type='application/json'
+    else:
+        boundary='tessentry'+uuid.uuid4().hex
+        chunks=[]
+        for key,value in fields.items():
+            chunks.append((f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n').encode())
+        chunks.append((f'--{boundary}\r\nContent-Disposition: form-data; name="video"; filename="event.mp4"\r\nContent-Type: video/mp4\r\n\r\n').encode())
+        chunks.append(Path(video).read_bytes())
+        chunks.append(f'\r\n--{boundary}--\r\n'.encode())
+        body=b''.join(chunks)
+        content_type='multipart/form-data; boundary='+boundary
+    # Do not expose the token-bearing URL or server response to logs or UI.
+    req=urllib.request.Request('https://api.telegram.org/bot'+token+'/'+method,body,{'Content-Type':content_type},method='POST')
+    try:
+        with urllib.request.urlopen(req,timeout=90 if video else 30) as response:
+            result=json.loads(response.read(1024*1024))
+        if not result.get('ok'):
+            raise RuntimeError('Telegram API rejected the request')
+    except (urllib.error.HTTPError,urllib.error.URLError,TimeoutError,ValueError):
+        raise RuntimeError('Telegram delivery failed; check bot credentials, destination and connectivity') from None
+
+
+def telegram_location(cfg,meta):
+    import math
+    try:
+        data=json.loads(meta.read_text(encoding='utf-8'))
+        lat=float(data['est_lat']); lon=float(data['est_lon'])
+    except (OSError,ValueError,TypeError,KeyError):
+        return False
+    if not (math.isfinite(lat) and math.isfinite(lon) and -90<=lat<=90 and -180<=lon<=180):
+        return False
+    telegram_request(cfg,'sendLocation',{'latitude':lat,'longitude':lon})
+    return True
+
+
+def telegram_event(cfg,folder,video,meta,part):
+    caption=event_text(folder,meta,cfg.get('notification_language','en'))
+    if part=='text':
+        telegram_request(cfg,'sendMessage',{'text':caption})
+    elif part=='video':
+        # Telegram video captions are limited to 1024 characters.
+        if len(caption)>1024:
+            raise ValueError('Telegram event caption exceeds 1024 characters')
+        prepared,temporary=prepare_h264_video(video)
+        try:
+            if prepared.stat().st_size>50*1024*1024:
+                raise ValueError('Telegram video exceeds the 50 MB Bot API upload limit')
+            telegram_request(cfg,'sendVideo',{'caption':caption,'supports_streaming':'true'},video=prepared)
+        finally:
+            if temporary: prepared.unlink(missing_ok=True)
+    else: raise ValueError('Invalid Telegram event part')
+
+
+def delivery_done(c,key,provider,part):
+    row=c.execute('SELECT status FROM deliveries WHERE event_id=? AND provider=? AND part=?',(key,provider,part)).fetchone()
+    return bool(row and row[0]=='sent')
+
+
+def mark_delivery(c,key,provider,part):
+    c.execute('INSERT OR REPLACE INTO deliveries(event_id,provider,part,status) VALUES (?,?,?,?)',(key,provider,part,'sent'))
+    if provider=='whatsapp':
+        col={'text':'text_sent','video':'video_sent','location':'location_sent'}[part]
+        c.execute(f'UPDATE events SET {col}=1 WHERE id=?',(key,))
+    c.commit()
+
+
+def deliver_provider(c,key,cfg,provider,folder,video,meta):
+    part='video' if cfg['send_video'] else 'text'
+    if not (cfg['send_video'] or cfg['send_text']): return
+    # Migration: retain existing WhatsApp progress for older incomplete rows.
+    legacy=c.execute('SELECT text_sent,video_sent,location_sent FROM events WHERE id=?',(key,)).fetchone()
+    for index,name in enumerate(('text','video','location')):
+        if provider=='whatsapp' and legacy and legacy[index] and not delivery_done(c,key,provider,name):
+            mark_delivery(c,key,provider,name)
+    if not delivery_done(c,key,provider,part):
+        if provider=='whatsapp': send_part(cfg,folder,video,meta,part)
+        else: telegram_event(cfg,folder,video,meta,part)
+        mark_delivery(c,key,provider,part)
+    if not delivery_done(c,key,provider,'location'):
+        delivered=send_location(cfg,meta) if provider=='whatsapp' else telegram_location(cfg,meta)
+        # No valid location is a completed optional part.
+        mark_delivery(c,key,provider,'location')
+
 def scan_once():
     cfg=config()
     if not cfg['enabled']: return
-    if not (cfg['openwa_url'] and cfg['openwa_api_key'] and cfg['openwa_session'] and cfg['openwa_chat_id']): return
+    providers=selected_providers(cfg)
+    if not all(provider_configured(cfg,p) for p in providers):
+        LOG.warning('Selected notification provider is not configured')
+        return
     baseline_existing_events(cfg)
     c=db()
     try:
-        ready = c.execute(
-            "SELECT 1 FROM settings WHERE key='baseline_complete'"
-        ).fetchone()
-        if not ready:
+        if not c.execute("SELECT 1 FROM settings WHERE key='baseline_complete'").fetchone():
             LOG.warning('Waiting for initial baseline')
             return
-    finally:
-        c.close()
-    c=db()
-    try:
         for key,folder,video,meta in discover(cfg):
-            row=c.execute('SELECT status,attempts,updated,text_sent,video_sent,location_sent FROM events WHERE id=?',(key,)).fetchone()
+            row=c.execute('SELECT status,attempts,updated FROM events WHERE id=?',(key,)).fetchone()
             if row and row[0] in ('sent','sending','review','skipped'): continue
             if row and (row[1]>=10 or (row[2] and time.time()-row[2]<min(3600,60*2**min(row[1],6)))): continue
             attempts=(row[1] if row else 0)+1
-            text_done=bool(row[3]) if row else False
-            video_done=bool(row[4]) if row else False
-            location_done=bool(row[5]) if row else False
-            # Persist 'sending' before any external request. Interrupted calls are
-            # uncertain and require manual review rather than automatic replay.
-            c.execute('INSERT OR REPLACE INTO events (id,path,status,attempts,error,updated,text_sent,video_sent,location_sent) VALUES (?,?,?,?,?,?,?,?,?)',
-                      (key,str(folder),'sending',attempts,'',int(time.time()),int(text_done),int(video_done),int(location_done)))
+            # Persist sending before external requests: uncertain responses require review.
+            if row:
+                c.execute('UPDATE events SET status=?,attempts=?,error=?,updated=? WHERE id=?',('sending',attempts,'',int(time.time()),key))
+            else:
+                c.execute('INSERT INTO events(id,path,status,attempts,error,updated) VALUES (?,?,?,?,?,?)',(key,str(folder),'sending',attempts,'',int(time.time())))
             c.commit()
             try:
-                # Send the event video first, with the event details as caption.
-                # If video is disabled, use a text notification instead.
-                part = 'video' if cfg['send_video'] else 'text'
-                enabled = cfg['send_video'] or cfg['send_text']
-                done = video_done if part == 'video' else text_done
-
-                if enabled and not done:
-                    send_part(cfg,folder,video,meta,part)
-                    c.execute(
-                        f'UPDATE events SET {part}_sent=1,updated=? WHERE id=?',
-                        (int(time.time()),key)
-                    )
-                    c.commit()
-
-                # Send a native WhatsApp location card after the event message.
-                # Missing or invalid coordinates do not block the event.
-                if enabled and not location_done:
-                    location_result = send_location(cfg,meta)
-                    if location_result:
-                        c.execute(
-                            'UPDATE events SET location_sent=1,updated=? WHERE id=?',
-                            (int(time.time()),key)
-                        )
-                        c.commit()
-                c.execute('UPDATE events SET status=?,error=?,updated=? WHERE id=?',('sent','',int(time.time()),key));c.commit()
-                LOG.info('Sent event %s',folder)
+                for provider in providers:
+                    deliver_provider(c,key,cfg,provider,folder,video,meta)
+                c.execute('UPDATE events SET status=?,error=?,updated=? WHERE id=?',('sent','',int(time.time()),key))
+                c.commit()
+                LOG.info('Sent event %s to %s',folder,','.join(providers))
             except Exception as e:
-                # Request may have been accepted remotely despite timeout. Hold for
-                # review instead of automatically retrying an uncertain delivery.
-                c.execute('UPDATE events SET status=?,error=?,updated=? WHERE id=?',('review',str(e)[:300],int(time.time()),key));c.commit()
-                LOG.exception('Delivery needs review: %s',folder)
+                # A timeout can mean the remote side accepted the message.
+                # Never replay automatically, even if another provider succeeded.
+                error=str(e)
+                if cfg.get('telegram_bot_token'):
+                    error=error.replace(cfg['telegram_bot_token'],'[redacted]')
+                c.execute('UPDATE events SET status=?,error=?,updated=? WHERE id=?',('review',error[:300],int(time.time()),key))
+                c.commit()
+                LOG.error('Delivery needs review for %s: %s',folder,error)
     finally: c.close()
 
 def worker():

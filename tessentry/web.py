@@ -3,7 +3,7 @@ import os,json,html,secrets,hashlib,hmac,threading,time,logging,socket,subproces
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from urllib.parse import parse_qs,urlparse
-from .core import BASE,config,save_config,status,db,validate_openwa_url
+from .core import BASE,config,save_config,status,db,validate_openwa_url,provider_configured,selected_providers
 SESS={}; LOCK=threading.Lock()
 
 def hash_password(p,salt=None):
@@ -45,8 +45,15 @@ class Handler(BaseHTTPRequestHandler):
         if not self.session():return self.send(page('Login','<h2>Sign in</h2><form method="post" action="/tessentry/login"><label>Password<input type="password" name="password" required></label><button>Sign in</button></form>'),401)
         if path=='/tessentry/settings':
             c=config();token=self.session();s='<h2>Settings</h2><p><small>Secrets are stored locally, never committed to GitHub. Saving does not send test messages.</small></p><form method="post" action="/tessentry/settings"><input type="hidden" name="csrf" value="'+esc(token)+'">'
+            s+='<label>Notification provider<select name="notification_provider">'
+            for code,label in [('whatsapp','WhatsApp (OpenWA)'),('telegram','Telegram Bot'),('both','WhatsApp + Telegram')]:
+                selected=' selected' if c['notification_provider']==code else ''
+                s+=f'<option value="{code}"{selected}>{label}</option>'
+            s+='</select></label><h3>WhatsApp / OpenWA</h3>'
             for k,label in [('openwa_url','OpenWA base URL (e.g. http://100.75.224.110:2785)'),('openwa_session','OpenWA session'),('openwa_chat_id','WhatsApp chat/group ID')]:s+=f'<label>{label}<input name="{k}" value="{esc(c[k])}"></label>'
             s+='<label>OpenWA API key (leave blank to keep current)<input type="password" name="openwa_api_key" autocomplete="new-password" placeholder="'+('Configured' if c['openwa_api_key'] else 'Not configured')+'"></label>'
+            s+='<h3>Telegram Bot</h3><label>Telegram Bot Token (leave blank to keep current)<input type="password" name="telegram_bot_token" autocomplete="new-password" placeholder="'+('Configured' if c['telegram_bot_token'] else 'Not configured')+'"></label>'
+            s+='<label>Telegram Chat ID (numeric ID or @channelusername)<input name="telegram_chat_id" value="'+esc(c['telegram_chat_id'])+'"></label>'
             s+='<label>Event folders (one per line)<textarea name="folders" rows="3">'+esc('\n'.join(c['folders']))+'</textarea></label>'
             s+='<label>Notification language<select name="notification_language">'
             for code,label in [('en','English'),('he','עברית (Hebrew)')]:
@@ -55,11 +62,11 @@ class Handler(BaseHTTPRequestHandler):
             s+='</select></label>'
             for k,label in [('enabled','Enable monitoring'),('send_text','Send event details'),('send_video','Send event.mp4'),('allow_non_tailnet','Allow OpenWA URL outside Tailscale (LAN only)')]:s+=f'<label><input type="checkbox" name="{k}" {"checked" if c[k] else ""}> {label}</label>'
             for k,label in [('settle_seconds','Minimum file age in seconds'),('scan_interval_seconds','Scan interval in seconds')]:s+=f'<label>{label}<input type="number" name="{k}" value="{esc(c[k])}" min="10" max="3600"></label>'
-            s+='<button>Save settings</button></form><p><small>OpenWA message API routes and payloads must be verified on your server before enabling monitoring.</small></p>'
+            s+='<button>Save settings</button></form><p><small>Only configured destinations receive notifications. New provider settings take effect on the next scan.</small></p>'
             return self.send(page('Settings',s))
         if path=='/tessentry/':
             st=status(); c=config(); conn=db(); rows=conn.execute('SELECT path,status,attempts,error,updated FROM events ORDER BY updated DESC LIMIT 20').fetchall();conn.close()
-            s='<h2>Status</h2><p>Monitoring: <b>'+('enabled' if c['enabled'] else 'disabled')+'</b></p><p>OpenWA configured: '+('yes' if all(c.get(k) for k in ('openwa_url','openwa_api_key','openwa_session','openwa_chat_id')) else 'no')+'</p><p>Events: '+esc(st['counts'])+'</p><h3>Watched folders</h3>'
+            s='<h2>Status</h2><p>Monitoring: <b>'+('enabled' if c['enabled'] else 'disabled')+'</b></p><p>Notification provider: '+esc(c['notification_provider'])+'</p><p>OpenWA configured: '+('yes' if provider_configured(c,'whatsapp') else 'no')+'</p><p>Telegram configured: '+('yes' if provider_configured(c,'telegram') else 'no')+'</p><p>Events: '+esc(st['counts'])+'</p><h3>Watched folders</h3>'
             for x in st['folders']:s+='<p>'+esc(x['path'])+' — '+('available' if x['exists'] else 'missing')+'</p>'
             # Local health probes only; never send API keys to a status endpoint.
             try:
@@ -96,8 +103,22 @@ class Handler(BaseHTTPRequestHandler):
         if not token or not hmac.compare_digest(f.get('csrf',''),token):return self.send(page('Forbidden','Invalid session'),403)
         if path!='/tessentry/settings':return self.send(page('Not found','Not found'),404)
         c=config()
+        provider=f.get('notification_provider','whatsapp')
+        if provider not in ('whatsapp','telegram','both'):
+            return self.send(page('Invalid','Unsupported notification provider.'),400)
+        c['notification_provider']=provider
         for k in ('openwa_url','openwa_session','openwa_chat_id'):c[k]=f.get(k,'').strip()
         if f.get('openwa_api_key','').strip():c['openwa_api_key']=f['openwa_api_key'].strip()
+        if f.get('telegram_bot_token','').strip():c['telegram_bot_token']=f['telegram_bot_token'].strip()
+        c['telegram_chat_id']=f.get('telegram_chat_id','').strip()
+        if c['telegram_bot_token']:
+            import re
+            if not re.fullmatch(r'[0-9]{5,15}:[A-Za-z0-9_-]{20,}',c['telegram_bot_token']):
+                return self.send(page('Invalid','Invalid Telegram bot token format.'),400)
+        if c['telegram_chat_id']:
+            import re
+            if len(c['telegram_chat_id'])>128 or not re.fullmatch(r'[-@A-Za-z0-9_]+',c['telegram_chat_id']):
+                return self.send(page('Invalid','Invalid Telegram chat ID.'),400)
         folders=[x.strip() for x in f.get('folders','').splitlines() if x.strip()]
         if not folders or len(folders)>10 or any(not x.startswith('/mutable/TeslaCam/') and not x.startswith('/var/www/html/TeslaCam/') for x in folders):return self.send(page('Invalid folders','Use absolute TeslaCam paths only.'),400)
         c['folders']=folders
@@ -112,6 +133,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not 10<=v<=3600:raise ValueError()
                 c[k]=v
         except ValueError:return self.send(page('Invalid','Intervals must be 10–3600 seconds.'),400)
+        if c['enabled'] and not all(provider_configured(c,p) for p in selected_providers(c)):
+            return self.send(page('Invalid','Configure all selected notification providers before enabling monitoring.'),400)
         save_config(c)
         return self.send(page('Saved','<p>Settings saved. <a href="/tessentry/">Back to status</a></p>'))
 
