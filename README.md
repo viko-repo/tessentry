@@ -71,9 +71,57 @@ Sign in with the installation password, then configure the OpenWA server URL, se
 - Keeps Tessentry configuration and history under `/mutable/tessentry`.
 - Does not intentionally modify TeslaCam recordings, Sentry-USB-Rusty `archiveloop`, or snapshots.
 
-## Screenshots
+## Setup walkthrough — real screenshots
 
-Screenshots of the login, status, settings and WhatsApp notification screens will be added here **after privacy redaction**. Public examples will hide real locations, Tailscale IP addresses, credentials, group identifiers and video frames. Illustrations are not a substitute for screenshots of the actual running UI.
+These are screenshots of the actual Tessentry interface. Follow the installation roadmap above before using the web UI. The screenshots show different stages of setup, **not** a single live status report.
+
+### 1. First sign-in
+
+On first installation, the installer prints a generated administrator password in the SSH terminal. Save it securely, open the Tessentry web interface, and enter the password.
+
+![Tessentry initial password sign-in screen](docs/images/01-initial-sign-in.jpg)
+
+### 2. Successful sign-in
+
+After entering the correct password, Tessentry confirms the session. Click **Open status** to check the initial state.
+
+![Tessentry successful sign-in confirmation](docs/images/02-successful-sign-in.jpg)
+
+### 3. Check the initial status
+
+Before configuration, **Monitoring: disabled** and **OpenWA configured: no** are expected. Check that the watched Sentry event folders and Tailscale are available.
+
+![Tessentry initial status before OpenWA configuration](docs/images/03-initial-system-status.jpeg)
+
+### 4. Enter the OpenWA and event settings
+
+Open **Settings** and enter your own values:
+
+- **OpenWA base URL:** Your OpenWA server address and port, preferably reachable over Tailscale.
+- **OpenWA session:** The session identifier configured on your OpenWA server.
+- **WhatsApp chat/group ID:** The destination for notifications.
+- **OpenWA API key:** The key required by your server, if applicable. When editing an existing configuration, leaving this blank retains the current key.
+- **Event folders:** The actual `SentryClips` and `SavedClips` archive paths on your Sentry-USB-Rusty installation.
+- **Notification options:** Language, event details, video delivery and monitoring.
+- **Timing:** Minimum event-file age and scan interval.
+
+Click **Save settings**. Verify connectivity and test message delivery before enabling monitoring. The screenshot shows a configuration example with connection fields cleared or redacted; **do not copy its values**.
+
+![Tessentry settings page with sensitive connection fields removed](docs/images/04-settings-configuration.jpg)
+
+### 5. Verify the configured status
+
+Return to **Status** after saving. When monitoring has been enabled and the integration configured, the page should report **Monitoring: enabled**, **OpenWA configured: yes**, available event folders and Tailscale connectivity.
+
+**Important:** **OpenWA: TCP reachable (API not verified)** only confirms that the network port responds. It does not prove authenticated API access or successful WhatsApp delivery. Check `tessentry-worker` separately if needed.
+
+![Tessentry configured status with monitoring enabled](docs/images/05-configured-system-status.jpg)
+
+### 6. Real WhatsApp notification — manual test
+
+This is a real notification delivered through OpenWA during a manual end-to-end test. It contains a short `event.mp4` clip and event details (date, time, reason and camera), followed by a separate native WhatsApp location card. The video and map are obscured for privacy. **Automatic unattended delivery from a newly archived Tesla event is still awaiting real-world validation.**
+
+![Actual Tessentry WhatsApp notification with video and map obscured](docs/images/06-real-whatsapp-notification.jpg)
 
 ## Security and limitations
 
