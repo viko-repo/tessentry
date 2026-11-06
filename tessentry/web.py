@@ -48,6 +48,11 @@ class Handler(BaseHTTPRequestHandler):
             for k,label in [('openwa_url','OpenWA base URL (e.g. http://100.75.224.110:2785)'),('openwa_session','OpenWA session'),('openwa_chat_id','WhatsApp chat/group ID')]:s+=f'<label>{label}<input name="{k}" value="{esc(c[k])}"></label>'
             s+='<label>OpenWA API key (leave blank to keep current)<input type="password" name="openwa_api_key" autocomplete="new-password" placeholder="'+('Configured' if c['openwa_api_key'] else 'Not configured')+'"></label>'
             s+='<label>Event folders (one per line)<textarea name="folders" rows="3">'+esc('\n'.join(c['folders']))+'</textarea></label>'
+            s+='<label>Notification language<select name="notification_language">'
+            for code,label in [('en','English'),('he','עברית (Hebrew)')]:
+                selected=' selected' if c['notification_language']==code else ''
+                s+=f'<option value="{code}"{selected}>{label}</option>'
+            s+='</select></label>'
             for k,label in [('enabled','Enable monitoring'),('send_text','Send event details'),('send_video','Send event.mp4'),('allow_non_tailnet','Allow OpenWA URL outside Tailscale (LAN only)')]:s+=f'<label><input type="checkbox" name="{k}" {"checked" if c[k] else ""}> {label}</label>'
             for k,label in [('settle_seconds','Minimum file age in seconds'),('scan_interval_seconds','Scan interval in seconds')]:s+=f'<label>{label}<input type="number" name="{k}" value="{esc(c[k])}" min="10" max="3600"></label>'
             s+='<button>Save settings</button></form><p><small>OpenWA message API routes and payloads must be verified on your server before enabling monitoring.</small></p>'
@@ -96,6 +101,10 @@ class Handler(BaseHTTPRequestHandler):
         folders=[x.strip() for x in f.get('folders','').splitlines() if x.strip()]
         if not folders or len(folders)>10 or any(not x.startswith('/mutable/TeslaCam/') and not x.startswith('/var/www/html/TeslaCam/') for x in folders):return self.send(page('Invalid folders','Use absolute TeslaCam paths only.'),400)
         c['folders']=folders
+        language=f.get('notification_language','en')
+        if language not in ('en','he'):
+            return self.send(page('Invalid','Unsupported notification language.'),400)
+        c['notification_language']=language
         for k in ('enabled','send_text','send_video','allow_non_tailnet'):c[k]=k in f
         try:
             for k in ('settle_seconds','scan_interval_seconds'):

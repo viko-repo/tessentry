@@ -1,0 +1,12 @@
+{
+  "title": "🚨 *התראת שמירה - Tesla*",
+  "date_time": "📅 תאריך ושעה",
+  "reason": "⚠️ סיבה",
+  "camera": "📷 מצלמה",
+  "location": "📍 מיקום",
+  "map": "🗺️ צפייה במיקום המשוער",
+  "reason_object": "זוהה אובייקט (Sentry)",
+  "camera_front": "קדמית",
+  "camera_left": "צד שמאל (נהג)",
+  "camera_right": "צד ימין (נוסע)"
+}

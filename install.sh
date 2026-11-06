@@ -93,6 +93,13 @@ if (( ROOT_WAS_RO )); then
   fi
 fi
 
+echo "Installing FFmpeg dependencies..."
+
+if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
+  apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get install -y ffmpeg
+fi
+
 echo "Creating Tessentry system user..."
 
 if ! id tessentry >/dev/null 2>&1; then
@@ -201,7 +208,7 @@ UNIT
 echo "Enabling Tessentry services..."
 
 systemctl daemon-reload
-systemctl enable tessentry-worker.service tessentry-web.service
+systemctl enable --now tessentry-worker.service tessentry-web.service
 
 echo
 echo "=============================================="

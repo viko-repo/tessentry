@@ -3,7 +3,7 @@ import json, os, time, sqlite3, hashlib, urllib.request, urllib.error, mimetypes
 from pathlib import Path
 
 BASE=Path(os.environ.get('TESSENTRY_DATA','/mutable/tessentry'))
-DEFAULTS={'enabled':False,'scan_interval_seconds':30,'settle_seconds':90,'folders':['/mutable/TeslaCam/SentryClips','/mutable/TeslaCam/SavedClips'],'openwa_url':'','openwa_api_key':'','openwa_session':'','openwa_chat_id':'','send_video':True,'send_text':True,'allow_non_tailnet':False}
+DEFAULTS={'enabled':False,'scan_interval_seconds':30,'settle_seconds':90,'folders':['/mutable/TeslaCam/SentryClips','/mutable/TeslaCam/SavedClips'],'openwa_url':'','openwa_api_key':'','openwa_session':'','openwa_chat_id':'','send_video':True,'send_text':True,'notification_language':'en','allow_non_tailnet':False}
 LOG=logging.getLogger('tessentry')
 
 def config():
@@ -25,7 +25,7 @@ def db():
     c=sqlite3.connect(BASE/'events.sqlite',timeout=20)
     c.execute('CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, path TEXT, status TEXT, attempts INTEGER DEFAULT 0, error TEXT, updated INTEGER)')
     cols={r[1] for r in c.execute('PRAGMA table_info(events)')}
-    for name in ('text_sent','video_sent'):
+    for name in ('text_sent','video_sent','location_sent'):
         if name not in cols: c.execute(f'ALTER TABLE events ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0')
     c.commit(); return c
 
@@ -55,21 +55,134 @@ def discover(cfg):
             key=hashlib.sha256(str(folder.resolve()).encode()).hexdigest()
             yield key,folder,video,meta
 
-def event_text(folder,meta):
-    try: data=json.loads(meta.read_text()) if meta.exists() else {}
-    except (OSError,ValueError): data={}
-    cameras={'0':'Front','5':'Left fender (driver)','6':'Right fender (passenger)'}
-    lines=['🚗 Tesla Sentry event',f'Folder: {folder.name}']
-    for key,label in [('timestamp','Time'),('reason','Reason')]:
-        if data.get(key): lines.append(f'{label}: {data[key]}')
-    if data.get('camera') is not None: lines.append('Camera: '+cameras.get(str(data['camera']),str(data['camera'])))
-    loc=', '.join(str(data[k]) for k in ('street','city') if data.get(k))
-    if loc: lines.append('Location: '+loc)
-    if data.get('est_lat') is not None and data.get('est_lon') is not None:
+
+
+def baseline_existing_events(cfg):
+    """Register existing events once, without sending notifications."""
+    c = db()
+    try:
+        c.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
+        if c.execute(
+            "SELECT 1 FROM settings WHERE key='baseline_complete'"
+        ).fetchone():
+            return
+
+        roots = [Path(f) for f in cfg['folders']]
+        if not roots or not all(root.is_dir() for root in roots):
+            LOG.warning('Baseline postponed: monitoring folder unavailable')
+            return
+
+        count = 0
+        for key, folder, video, meta in discover({**cfg, 'settle_seconds': 0}):
+            c.execute(
+                "INSERT OR IGNORE INTO events "
+                "(id,path,status,attempts,error,updated) VALUES (?,?,?,?,?,?)",
+                (key, str(folder), 'skipped', 0, '', int(time.time()))
+            )
+            count += 1
+
+        c.execute(
+            "INSERT INTO settings (key,value) VALUES (?,?)",
+            ('baseline_complete', str(int(time.time())))
+        )
+        c.commit()
+        LOG.info('Initial baseline complete: %d existing events', count)
+    finally:
+        c.close()
+
+
+def load_translations(language='en'):
+    """Load notification strings with English fallback."""
+    locale_dir = Path(__file__).resolve().parent / 'locales'
+
+    def read_locale(code):
+        path = locale_dir / (code + '.json')
+        data = json.loads(path.read_text(encoding='utf-8'))
+        if not isinstance(data, dict):
+            raise ValueError('Invalid translation format')
+        return data
+
+    try:
+        english = read_locale('en')
+    except (OSError, ValueError):
+        LOG.exception('English translations unavailable')
+        raise
+
+    if language not in ('en', 'he') or language == 'en':
+        return english
+
+    try:
+        translated = read_locale(language)
+        return {
+            key: translated.get(key, value)
+            for key, value in english.items()
+        }
+    except (OSError, ValueError):
+        LOG.warning('Translation unavailable: %s', language)
+        return english
+
+
+def event_text(folder, meta, language='en', include_map=False):
+    """Build a localized WhatsApp event caption."""
+    from datetime import datetime
+
+    t = load_translations(language)
+
+    try:
+        data = json.loads(meta.read_text()) if meta.exists() else {}
+    except (OSError, ValueError):
+        data = {}
+
+    lines = [t['title']]
+
+    timestamp = data.get('timestamp')
+    if timestamp:
         try:
-            lat=float(data['est_lat']); lon=float(data['est_lon'])
-            if -90<=lat<=90 and -180<=lon<=180: lines.append(f'Map (approx.): https://maps.google.com/?q={lat},{lon}')
-        except (TypeError,ValueError): pass
+            formatted = datetime.fromisoformat(
+                str(timestamp).replace('Z', '+00:00')
+            ).strftime('%d.%m.%Y | %H:%M:%S')
+        except ValueError:
+            formatted = str(timestamp)
+        lines.append(f"{t['date_time']}: {formatted}")
+
+    reason = data.get('reason')
+    if reason:
+        description = (
+            t['reason_object']
+            if reason == 'sentry_aware_object_detection'
+            else str(reason)
+        )
+        lines.append(f"{t['reason']}: {description}")
+
+    camera = data.get('camera')
+    if camera is not None:
+        camera_keys = {
+            '0': 'camera_front',
+            '5': 'camera_left',
+            '6': 'camera_right',
+        }
+        key = camera_keys.get(str(camera))
+        description = t[key] if key else str(camera)
+        lines.append(f"{t['camera']}: {description}")
+
+    location = ', '.join(
+        str(data[k]) for k in ('street', 'city') if data.get(k)
+    )
+    if location:
+        lines.append(f"{t['location']}: {location}")
+
+    if include_map and data.get('est_lat') is not None and data.get('est_lon') is not None:
+        try:
+            lat = float(data['est_lat'])
+            lon = float(data['est_lon'])
+            if -90 <= lat <= 90 and -180 <= lon <= 180:
+                lines.append(
+                    f"{t['map']}:\n"
+                    f"https://maps.google.com/?q={lat},{lon}"
+                )
+        except (TypeError, ValueError):
+            pass
+
     return '\n'.join(lines)
 
 def validate_openwa_url(cfg):
@@ -86,6 +199,58 @@ def validate_openwa_url(cfg):
             raise ValueError('OpenWA URL must be a Tailscale IPv4 address')
     return cfg['openwa_url'].rstrip('/')
 
+
+def prepare_h264_video(video):
+    """Return a temporary WhatsApp-compatible H.264 video."""
+    import subprocess
+    import tempfile
+
+    import shutil
+
+    ffmpeg = shutil.which('ffmpeg') or '/mutable/tessentry/bin/ffmpeg'
+    ffprobe = shutil.which('ffprobe') or '/mutable/tessentry/bin/ffprobe'
+
+    probe = subprocess.run(
+        [ffprobe, '-v', 'error', '-select_streams', 'v:0',
+         '-show_entries', 'stream=codec_name,width,height,pix_fmt',
+         '-of', 'json', str(video)],
+        capture_output=True, text=True, check=True, timeout=30
+    )
+    streams = json.loads(probe.stdout).get('streams', [])
+    if not streams:
+        raise ValueError('No video stream found')
+
+    stream = streams[0]
+    if (stream.get('codec_name') == 'h264'
+            and stream.get('pix_fmt') == 'yuv420p'
+            and stream.get('width', 0) % 2 == 0
+            and stream.get('height', 0) % 2 == 0):
+        return video, False
+
+    with tempfile.NamedTemporaryFile(
+        prefix='tessentry-h264-', suffix='.mp4',
+        dir=BASE, delete=False
+    ) as tmp:
+        output = Path(tmp.name)
+
+    try:
+        subprocess.run(
+            [ffmpeg, '-hide_banner', '-loglevel', 'error',
+             '-i', str(video), '-c:v', 'libx264',
+             '-preset', 'veryfast', '-crf', '23',
+             '-pix_fmt', 'yuv420p',
+             '-vf', 'pad=ceil(iw/2)*2:ceil(ih/2)*2',
+             '-movflags', '+faststart', '-an', '-y', str(output)],
+            capture_output=True, text=True, check=True, timeout=180
+        )
+        if output.stat().st_size == 0:
+            raise ValueError('Converted video is empty')
+        return output, True
+    except Exception:
+        output.unlink(missing_ok=True)
+        raise
+
+
 def send_part(cfg,folder,video,meta,part):
     """PREVIEW adapter: API route and payload MUST be validated before enabling."""
     from urllib.parse import quote
@@ -94,45 +259,132 @@ def send_part(cfg,folder,video,meta,part):
     chat=cfg['openwa_chat_id']
     headers={'X-Api-Key':cfg['openwa_api_key']}
     if part=='text':
-        body=json.dumps({'chatId':chat,'text':event_text(folder,meta)}).encode()
+        body=json.dumps({'chatId':chat,'text':event_text(folder,meta,cfg.get('notification_language','en'))}).encode()
         req=urllib.request.Request(f'{base}/api/sessions/{session}/messages/send-text',body,{**headers,'Content-Type':'application/json'},method='POST')
         with urllib.request.urlopen(req,timeout=30) as resp: resp.read()
     elif part=='video':
         import base64
-        body=json.dumps({
-            'chatId':chat,
-            'base64':base64.b64encode(video.read_bytes()).decode('ascii'),
-            'mimetype':'video/mp4',
-            'filename':'event.mp4',
-            'caption':'Tesla Sentry event'
-        }).encode()
-        req=urllib.request.Request(f'{base}/api/sessions/{session}/messages/send-video',body,{**headers,'Content-Type':'application/json'},method='POST')
-        with urllib.request.urlopen(req,timeout=90) as resp: resp.read()
+        prepared, temporary = prepare_h264_video(video)
+        try:
+            body=json.dumps({
+                'chatId':chat,
+                'base64':base64.b64encode(prepared.read_bytes()).decode('ascii'),
+                'mimetype':'video/mp4',
+                'filename':'event.mp4',
+                'caption':event_text(folder,meta,cfg.get('notification_language','en'))
+            }).encode()
+            req=urllib.request.Request(f'{base}/api/sessions/{session}/messages/send-video',body,{**headers,'Content-Type':'application/json'},method='POST')
+            with urllib.request.urlopen(req,timeout=90) as resp: resp.read()
+        finally:
+            if temporary:
+                prepared.unlink(missing_ok=True)
     else: raise ValueError('Unknown message part')
+
+
+def send_location(cfg, meta):
+    """Send a native WhatsApp location card when valid coordinates exist."""
+    import math
+    from urllib.parse import quote
+
+    try:
+        data = json.loads(meta.read_text(encoding='utf-8'))
+        lat = float(data['est_lat'])
+        lon = float(data['est_lon'])
+    except (OSError, ValueError, TypeError, KeyError):
+        return False
+
+    if not (math.isfinite(lat) and math.isfinite(lon)
+            and -90 <= lat <= 90 and -180 <= lon <= 180):
+        return False
+
+    base = validate_openwa_url(cfg)
+    session = quote(cfg['openwa_session'], safe='')
+    language = cfg.get('notification_language', 'en')
+
+    description = (
+        'מיקום אירוע Sentry' if language == 'he'
+        else 'Sentry Event Location'
+    )
+
+    payload = {
+        'chatId': cfg['openwa_chat_id'],
+        'latitude': lat,
+        'longitude': lon,
+        'description': description,
+        'address': 'Tesla Sentry'
+    }
+
+    url = f'{base}/api/sessions/{session}/messages/send-location'
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode('utf-8'),
+        headers={
+            'X-Api-Key': cfg['openwa_api_key'],
+            'Content-Type': 'application/json'
+        },
+        method='POST'
+    )
+
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        resp.read()
+
+    return True
 
 def scan_once():
     cfg=config()
     if not cfg['enabled']: return
     if not (cfg['openwa_url'] and cfg['openwa_api_key'] and cfg['openwa_session'] and cfg['openwa_chat_id']): return
+    baseline_existing_events(cfg)
+    c=db()
+    try:
+        ready = c.execute(
+            "SELECT 1 FROM settings WHERE key='baseline_complete'"
+        ).fetchone()
+        if not ready:
+            LOG.warning('Waiting for initial baseline')
+            return
+    finally:
+        c.close()
     c=db()
     try:
         for key,folder,video,meta in discover(cfg):
-            row=c.execute('SELECT status,attempts,updated,text_sent,video_sent FROM events WHERE id=?',(key,)).fetchone()
-            if row and row[0] in ('sent','sending','review'): continue
+            row=c.execute('SELECT status,attempts,updated,text_sent,video_sent,location_sent FROM events WHERE id=?',(key,)).fetchone()
+            if row and row[0] in ('sent','sending','review','skipped'): continue
             if row and (row[1]>=10 or (row[2] and time.time()-row[2]<min(3600,60*2**min(row[1],6)))): continue
             attempts=(row[1] if row else 0)+1
             text_done=bool(row[3]) if row else False
             video_done=bool(row[4]) if row else False
+            location_done=bool(row[5]) if row else False
             # Persist 'sending' before any external request. Interrupted calls are
             # uncertain and require manual review rather than automatic replay.
-            c.execute('INSERT OR REPLACE INTO events (id,path,status,attempts,error,updated,text_sent,video_sent) VALUES (?,?,?,?,?,?,?,?)',
-                      (key,str(folder),'sending',attempts,'',int(time.time()),int(text_done),int(video_done)))
+            c.execute('INSERT OR REPLACE INTO events (id,path,status,attempts,error,updated,text_sent,video_sent,location_sent) VALUES (?,?,?,?,?,?,?,?,?)',
+                      (key,str(folder),'sending',attempts,'',int(time.time()),int(text_done),int(video_done),int(location_done)))
             c.commit()
             try:
-                for part,enabled,done in (('text',cfg['send_text'],text_done),('video',cfg['send_video'],video_done)):
-                    if enabled and not done:
-                        send_part(cfg,folder,video,meta,part)
-                        c.execute(f'UPDATE events SET {part}_sent=1,updated=? WHERE id=?',(int(time.time()),key)); c.commit()
+                # Send the event video first, with the event details as caption.
+                # If video is disabled, use a text notification instead.
+                part = 'video' if cfg['send_video'] else 'text'
+                enabled = cfg['send_video'] or cfg['send_text']
+                done = video_done if part == 'video' else text_done
+
+                if enabled and not done:
+                    send_part(cfg,folder,video,meta,part)
+                    c.execute(
+                        f'UPDATE events SET {part}_sent=1,updated=? WHERE id=?',
+                        (int(time.time()),key)
+                    )
+                    c.commit()
+
+                # Send a native WhatsApp location card after the event message.
+                # Missing or invalid coordinates do not block the event.
+                if enabled and not location_done:
+                    location_result = send_location(cfg,meta)
+                    if location_result:
+                        c.execute(
+                            'UPDATE events SET location_sent=1,updated=? WHERE id=?',
+                            (int(time.time()),key)
+                        )
+                        c.commit()
                 c.execute('UPDATE events SET status=?,error=?,updated=? WHERE id=?',('sent','',int(time.time()),key));c.commit()
                 LOG.info('Sent event %s',folder)
             except Exception as e:

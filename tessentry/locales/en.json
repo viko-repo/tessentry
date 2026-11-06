@@ -1,0 +1,12 @@
+{
+  "title": "🚨 *Tesla Sentry Alert*",
+  "date_time": "📅 Date & time",
+  "reason": "⚠️ Reason",
+  "camera": "📷 Camera",
+  "location": "📍 Location",
+  "map": "🗺️ View approximate location",
+  "reason_object": "Object detected (Sentry)",
+  "camera_front": "Front",
+  "camera_left": "Left fender (driver)",
+  "camera_right": "Right fender (passenger)"
+}

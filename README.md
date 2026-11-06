@@ -1,6 +1,6 @@
 # Tessentry 🚗
 
-**Tessentry v0.1.2 — early preview / not yet validated against your OpenWA deployment.**
+**Tessentry — Tesla Sentry notifications via OpenWA and Tailscale.**
 
 Tessentry monitors TeslaCam `SentryClips` and `SavedClips` event folders on a Sentry-USB-Rusty Raspberry Pi and can send `event.mp4` plus `event.json` metadata to an OpenWA/WAHA-compatible WhatsApp API over Tailscale.
 
@@ -9,11 +9,11 @@ Tessentry monitors TeslaCam `SentryClips` and `SavedClips` event folders on a Se
 - **Monitoring is disabled by default.** Configure and verify OpenWA's actual API before enabling.
 - Never store personal API keys or WhatsApp IDs in the Git repository. Local configuration lives at `/mutable/tessentry/config.json` (mode 0600).
 - Does **not** modify SentryUSB `archiveloop`, snapshots, recordings or TeslaCam files.
-- Watches folders you configure. The default `/mutable/TeslaCam/...` paths are **not proven to be the final archived paths**. Confirm them using a real archived event.
+- Monitors the configured TeslaCam folders. Folder access and event discovery were verified on the target Pi; automatic delivery of a newly archived event still requires real-world validation.
 - An event is eligible only after `event.mp4` exists and has an old enough modification time. This is a heuristic, **not** an archive completion guarantee.
 - Only folders containing `event.mp4` are sent. Missing `event.json` is allowed.
 - Text/video completion is recorded independently. Failed or interrupted deliveries are held for manual review (no unsafe automatic replay). The UI does not yet offer manual retry controls.
-- The multipart `send-file` and JSON `send-text` routes are **assumptions** based on common OpenWA conventions, not validated against your server. Adapt `tessentry/core.py:send` after checking your server's API.
+- Manual end-to-end tests confirmed Hebrew notifications, H.264 video delivery and native WhatsApp location messages with the tested OpenWA deployment.
 - Password-protected web UI is plain HTTP. Access it **only from a trusted LAN or Tailscale**, preferably through an encrypted proxy. Do not expose TCP 8788 to the Internet. The installer binds the UI **only to the current Tailscale IPv4 address**; no firewall rules are changed. If the Tailscale IP changes, reinstall to refresh the binding.
 - The UI shows Tailscale IP availability and an OpenWA TCP reachability probe, not an authenticated API health check. Worker health must still be checked with systemctl.
 
@@ -29,7 +29,7 @@ sudo bash install.sh
 
 This is the intended one-command installer **after checkout**; a future release may offer a verified single-line bootstrap. Do not pipe a remote script straight into root shell without review.
 
-The installer checks that `/mutable` is mounted and writable, temporarily remounts `/` writable if needed (preferring `/root/bin/remountfs_rw`), installs Python-only code and systemd units, and restores read-only root on exit. It does not install Python packages. The installer displays a generated admin password **once**; save it securely. Subsequent runs retain the existing password and configuration.
+The installer checks `/mutable`, temporarily remounts the root filesystem writable, installs FFmpeg when needed, installs the application and systemd services, starts the services, and restores the original read-only state. It does not install Python packages. The installer displays a generated admin password **once**; save it securely. Subsequent runs retain the existing password and configuration.
 
 Open `http://<PI-TAILSCALE-IP>:8788/tessentry/`, sign in, and configure OpenWA and event folders. Default monitoring: **off**. Service updates take effect at the next scan.
 
@@ -75,14 +75,15 @@ Create a `password.hash` in the data folder using `tessentry.web.hash_password(.
 
 License: MIT.
 
-## v0.1.2 security notes
 
-- Installer restores both root and boot RO states, reports cleanup failure and refuses installation without an active Tailscale IP.
-- Web UI binds only to the Tailscale IP, not `0.0.0.0`. Traffic remains plain HTTP inside the tailnet.
-- OpenWA routes are **not verified**: leave monitoring disabled until tested with a non-production destination.
-- Event delivery records text and video separately and holds ambiguous failures for review.
+## Current validation status
 
-
-## v0.1.2 installer fix
-
-Fix systemd TESSENTRY_BIND interpolation and print the actual Tailscale URL. Installation on the target SentryUSB device and OpenWA media API remain unvalidated; do not enable monitoring until verified.
+- Raspberry Pi 4, Debian 13 ARM64.
+- OpenWA connectivity over Tailscale: tested.
+- Hebrew WhatsApp notification: tested.
+- H.264 video delivery: tested manually.
+- Native WhatsApp location message: tested manually.
+- SQLite event deduplication and initial baseline: tested.
+- Automatic monitoring: enabled on the development Pi.
+- Fully unattended delivery from a newly archived Tesla event: awaiting real-world validation.
+- Fresh installation from this repository: not yet independently tested.

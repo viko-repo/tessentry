@@ -10,7 +10,9 @@ class TessentryTests(unittest.TestCase):
             f.write_text(json.dumps({'camera':'6','timestamp':'2026-11-05T12:00:00','est_lat':31.5,'est_lon':34.5}))
             msg=core.event_text(Path(d),f)
             self.assertIn('Right fender',msg)
-            self.assertIn('maps.google.com/?q=31.5,34.5',msg)
+            self.assertNotIn('maps.google.com', msg)
+            msg_with_map = core.event_text(Path(d), f, include_map=True)
+            self.assertIn('maps.google.com/?q=31.5,34.5', msg_with_map)
     def test_url(self):
         c=dict(core.DEFAULTS,openwa_url='http://100.75.224.110:2785')
         self.assertEqual(core.validate_openwa_url(c),c['openwa_url'])

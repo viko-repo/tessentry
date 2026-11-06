@@ -4,7 +4,18 @@ set -Eeuo pipefail
 # Uninstall does not delete /mutable/tessentry data.
 ROOT_RO=0
 [[ ",$(findmnt -no OPTIONS /)," == *,ro,* ]] && ROOT_RO=1
-trap 'if ((ROOT_RO)); then mount -o remount,ro / || true; fi' EXIT
+cleanup() {
+  local rc=$?
+  trap - EXIT
+  if (( ROOT_RO )); then
+    if ! mount -o remount,ro /; then
+      echo "CRITICAL: Failed to restore root filesystem to RO" >&2
+      rc=1
+    fi
+  fi
+  exit "$rc"
+}
+trap cleanup EXIT
 if ((ROOT_RO)); then mount -o remount,rw /; fi
 systemctl disable --now tessentry-worker.service tessentry-web.service || true
 rm -f /etc/systemd/system/tessentry-worker.service /etc/systemd/system/tessentry-web.service
