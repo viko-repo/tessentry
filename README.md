@@ -1,25 +1,42 @@
 # Tessentry 🚗
 
-**Tessentry — Tesla Sentry notifications via OpenWA and Tailscale.**
+**Tesla Sentry events → WhatsApp notifications, powered by Sentry-USB-Rusty, Tailscale and OpenWA.**
 
-Tessentry monitors TeslaCam `SentryClips` and `SavedClips` event folders on a Sentry-USB-Rusty Raspberry Pi and can send `event.mp4` plus `event.json` metadata to an OpenWA/WAHA-compatible WhatsApp API over Tailscale.
+Tessentry is a lightweight companion service for a Raspberry Pi running [Sentry-USB-Rusty](https://github.com/Sentry-Six/Sentry-USB-Rusty). It watches configured TeslaCam `SentryClips` and `SavedClips` event folders and sends event information, a short `event.mp4` clip, and an optional native WhatsApp location message through OpenWA.
 
-## Safety and limitations
+> **Start here: install Sentry-USB-Rusty first.** Tessentry is an add-on, not a replacement for the Tesla USB recorder or archive system. If Sentry-USB-Rusty is already installed and working, **do not reinstall it**.
 
-- **Monitoring is disabled by default.** Configure and verify OpenWA's actual API before enabling.
-- Never store personal API keys or WhatsApp IDs in the Git repository. Local configuration lives at `/mutable/tessentry/config.json` (mode 0600).
-- Does **not** modify SentryUSB `archiveloop`, snapshots, recordings or TeslaCam files.
-- Monitors the configured TeslaCam folders. Folder access and event discovery were verified on the target Pi; automatic delivery of a newly archived event still requires real-world validation.
-- An event is eligible only after `event.mp4` exists and has an old enough modification time. This is a heuristic, **not** an archive completion guarantee.
-- Only folders containing `event.mp4` are sent. Missing `event.json` is allowed.
-- Text/video completion is recorded independently. Failed or interrupted deliveries are held for manual review (no unsafe automatic replay). The UI does not yet offer manual retry controls.
-- Manual end-to-end tests confirmed Hebrew notifications, H.264 video delivery and native WhatsApp location messages with the tested OpenWA deployment.
-- Password-protected web UI is plain HTTP. Access it **only from a trusted LAN or Tailscale**, preferably through an encrypted proxy. Do not expose TCP 8788 to the Internet. The installer binds the UI **only to the current Tailscale IPv4 address**; no firewall rules are changed. If the Tailscale IP changes, reinstall to refresh the binding.
-- The UI shows Tailscale IP availability and an OpenWA TCP reachability probe, not an authenticated API health check. Worker health must still be checked with systemctl.
+## Installation roadmap
 
-## Install from a Git checkout
+| Step | Component | Purpose |
+| --- | --- | --- |
+| **1** | **[Sentry-USB-Rusty](https://github.com/Sentry-Six/Sentry-USB-Rusty)** | Tesla USB recording, event storage and archiving — **required first** |
+| 2 | [Tailscale](https://tailscale.com/) | Private connectivity between the Raspberry Pi and OpenWA |
+| 3 | OpenWA / compatible WhatsApp API | Send WhatsApp notifications and video |
+| 4 | **Tessentry** | Monitor new Sentry events and provide a configuration UI |
 
-On the Pi, **after reviewing the script**:
+### Step 1 — Install Sentry-USB-Rusty (required)
+
+Follow the **[official Sentry-USB-Rusty installation instructions](https://github.com/Sentry-Six/Sentry-USB-Rusty#install)**. For a supported Raspberry Pi, the upstream project provides a Raspberry Pi Imager manifest and a guided initial setup at `http://sentryusb.local`.
+
+1. Install and configure Sentry-USB-Rusty according to its official guide.
+2. Confirm the Pi is working with your Tesla and that recordings/events are being archived.
+3. Confirm the locations of the `SentryClips` and `SavedClips` folders on **your** installation.
+4. Keep Sentry-USB-Rusty running; Tessentry does not replace or reconfigure its archiving service.
+
+**Important:** The upstream project notes that Tesla dashcam encryption can prevent Sentry USB from reading recordings. Review its current compatibility guidance before troubleshooting missing events.
+
+### Step 2 — Set up Tailscale
+
+Install and authenticate Tailscale on the Raspberry Pi and on the host running OpenWA. Verify that the Pi can reach the OpenWA server across your tailnet. Tessentry's installer expects Tailscale to be installed and running and binds the web interface to the Pi's current Tailscale IPv4 address.
+
+### Step 3 — Prepare OpenWA
+
+Set up an OpenWA/compatible WhatsApp API server and verify that it can send a message to a **test** chat or group. Have its server URL, session, API key (if required), and target chat/group ID ready. Never put these credentials in GitHub.
+
+### Step 4 — Install Tessentry on the Raspberry Pi
+
+Review `install.sh` before running it, especially on a read-only Sentry-USB-Rusty system:
 
 ```bash
 git clone https://github.com/viko-repo/tessentry.git
@@ -27,15 +44,47 @@ cd tessentry
 sudo bash install.sh
 ```
 
-This is the intended one-command installer **after checkout**; a future release may offer a verified single-line bootstrap. Do not pipe a remote script straight into root shell without review.
+The installer checks that `/mutable` is writable, temporarily makes the root filesystem writable when needed, installs FFmpeg if required, installs Tessentry and its systemd services, and attempts to restore the original read-only state. It prints a generated administrator password on first installation; **save it securely**. Existing configuration and password are retained on subsequent installations.
 
-The installer checks `/mutable`, temporarily remounts the root filesystem writable, installs FFmpeg when needed, installs the application and systemd services, starts the services, and restores the original read-only state. It does not install Python packages. The installer displays a generated admin password **once**; save it securely. Subsequent runs retain the existing password and configuration.
+> **Installation status:** A fresh install directly from this GitHub repository has not yet been independently validated. Use a backup and review the installer before deployment.
 
-Open `http://<PI-TAILSCALE-IP>:8788/tessentry/`, sign in, and configure OpenWA and event folders. Default monitoring: **off**. Service updates take effect at the next scan.
+### Step 5 — Configure and enable monitoring
 
-## OpenWA integration
+Open the web interface from a device on your tailnet:
 
-Set OpenWA base URL, session, API key, and chat/group ID in Settings. By default, the OpenWA URL must use an IPv4 address in the Tailscale `100.64.0.0/10` range. You can explicitly allow a non-Tailscale URL for trusted LAN usage. Verify API headers, message endpoints, form-data field names and authentication against your running OpenWA server before enabling. **Do not test with a production WhatsApp group first.**
+```text
+http://<PI-TAILSCALE-IP>:8788/tessentry/
+```
+
+Sign in with the installation password, then configure the OpenWA server URL, session, API key, target chat/group ID and the TeslaCam event folders. Confirm the paths match your installation. Test delivery to a non-production WhatsApp destination before enabling monitoring.
+
+**Monitoring is disabled by default on a new installation.** Enabling it is an explicit configuration choice. Tessentry keeps an initial baseline to avoid sending old archived events as new alerts.
+
+## Features
+
+- Detects new events in configured `SentryClips` and `SavedClips` folders.
+- Reads `event.json` when present for time, location, reason and camera details.
+- Sends event details and an H.264-compatible `event.mp4` through the tested OpenWA integration.
+- Can send a native WhatsApp location message separately from the video.
+- Password-protected web UI for settings and status.
+- SQLite-backed event tracking to avoid duplicate sends.
+- Keeps Tessentry configuration and history under `/mutable/tessentry`.
+- Does not intentionally modify TeslaCam recordings, Sentry-USB-Rusty `archiveloop`, or snapshots.
+
+## Screenshots
+
+Screenshots of the login, status, settings and WhatsApp notification screens will be added here **after privacy redaction**. Public examples will hide real locations, Tailscale IP addresses, credentials, group identifiers and video frames. Illustrations are not a substitute for screenshots of the actual running UI.
+
+## Security and limitations
+
+- **Never publish** `/mutable/tessentry/config.json`, `password.hash`, SQLite databases, API keys, private IP addresses, or TeslaCam recordings.
+- The web UI currently uses **plain HTTP**. Access it only through a trusted network/Tailscale; do **not** expose port `8788` directly to the public Internet. Prefer an encrypted reverse proxy when appropriate.
+- The installer binds to the current Tailscale IPv4 address. If that address changes, the binding must be updated.
+- Event eligibility uses the presence and age of `event.mp4`; this does **not** guarantee archiving has fully finished.
+- Missing `event.json` is permitted when `event.mp4` exists.
+- Failed or interrupted deliveries may require manual review; automatic replay is intentionally restricted to avoid duplicates.
+- The UI's OpenWA reachability indication is not a complete authenticated API health check. Check worker status with `systemctl`.
+- This is an independent companion project, not affiliated with Tesla or the Sentry-USB-Rusty maintainers.
 
 ## Diagnostics
 
@@ -45,45 +94,40 @@ journalctl -u tessentry-worker -n 50 --no-pager
 tailscale status
 ```
 
-## Remove
+## Uninstall
+
+From the checked-out project directory:
 
 ```bash
 sudo bash uninstall.sh
 ```
 
-Uninstall retains `/mutable/tessentry` (including credentials and history). Delete that directory manually only if you intend to erase all local data.
+Uninstalling the services preserves `/mutable/tessentry` and its configuration/history. Remove that data separately **only** if you deliberately want to erase it.
 
-## Development
+## Development and tests
 
-Standard library only, Python 3.11+. To run on a development machine:
+Tessentry uses Python 3.11+ and the standard library for its Python code. Run the included tests with:
 
 ```bash
-export TESSENTRY_DATA=/tmp/tessentry-dev
-python3 -m tessentry web
-python3 -m tessentry worker
+python3 -m unittest discover -s tests -v
 ```
 
-Create a `password.hash` in the data folder using `tessentry.web.hash_password(...)` before logging in.
+## Validation status
 
-## Planned improvements
+| Capability | Status |
+| --- | --- |
+| Raspberry Pi 4 / Debian 13 ARM64 development environment | Tested |
+| OpenWA connectivity over Tailscale | Tested |
+| Hebrew WhatsApp text notification | Tested manually |
+| H.264 video delivery | Tested manually |
+| Native WhatsApp location message | Tested manually |
+| SQLite deduplication and initial baseline | Tested |
+| Automatic monitoring on development Pi | Enabled |
+| Fully unattended delivery from a newly archived real Tesla event | **Awaiting real-world validation** |
+| Fresh installation from GitHub on a new device | **Not yet independently validated** |
 
-- Validate real OpenWA routes and end-to-end video delivery.
-- Verify final SentryUSB archive folder and reliable completion signals.
-- Per-channel send state, safe retries, and manual requeue.
-- Add HTTPS and authenticated OpenWA API health checks; validate Tailnet IP binding on network changes.
-- Unit and integration tests with recorded fixtures.
+## Credits
 
-License: MIT.
+Tessentry builds on the recording and archiving functionality of **[Sentry-USB-Rusty by Sentry-Six](https://github.com/Sentry-Six/Sentry-USB-Rusty)**. Please follow and support the upstream project. Sentry-USB-Rusty has its own license and installation requirements; Tessentry's repository contains its own MIT license.
 
-
-## Current validation status
-
-- Raspberry Pi 4, Debian 13 ARM64.
-- OpenWA connectivity over Tailscale: tested.
-- Hebrew WhatsApp notification: tested.
-- H.264 video delivery: tested manually.
-- Native WhatsApp location message: tested manually.
-- SQLite event deduplication and initial baseline: tested.
-- Automatic monitoring: enabled on the development Pi.
-- Fully unattended delivery from a newly archived Tesla event: awaiting real-world validation.
-- Fresh installation from this repository: not yet independently tested.
+**Tessentry license:** MIT — see [LICENSE](LICENSE).
