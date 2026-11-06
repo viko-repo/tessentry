@@ -393,9 +393,21 @@ def telegram_location(cfg,meta):
 
 
 def telegram_event(cfg,folder,video,meta,part):
-    caption=event_text(folder,meta,cfg.get('notification_language','en'))
+    import html
+    caption=event_text(folder,meta,cfg.get('notification_language','en'),include_map=True)
+    marker='https://maps.google.com/?q='
+    if marker in caption:
+        prefix, url = caption.rsplit(marker, 1)
+        lines = prefix.rstrip('\n').split('\n')
+        if lines and lines[-1].endswith(':'):
+            lines.pop()
+        caption = (html.escape('\n'.join(lines)) +
+                   '\n<a href="' + html.escape(marker + url.strip(), quote=True) +
+                   '">' + html.escape(load_translations(cfg.get('notification_language','en'))['map']) + '</a>')
+    else:
+        caption=html.escape(caption)
     if part=='text':
-        telegram_request(cfg,'sendMessage',{'text':caption})
+        telegram_request(cfg,'sendMessage',{'text':caption,'parse_mode':'HTML'})
     elif part=='video':
         # Telegram video captions are limited to 1024 characters.
         if len(caption)>1024:
@@ -404,7 +416,7 @@ def telegram_event(cfg,folder,video,meta,part):
         try:
             if prepared.stat().st_size>50*1024*1024:
                 raise ValueError('Telegram video exceeds the 50 MB Bot API upload limit')
-            telegram_request(cfg,'sendVideo',{'caption':caption,'supports_streaming':'true'},video=prepared)
+            telegram_request(cfg,'sendVideo',{'caption':caption,'parse_mode':'HTML','supports_streaming':'true'},video=prepared)
         finally:
             if temporary: prepared.unlink(missing_ok=True)
     else: raise ValueError('Invalid Telegram event part')
@@ -436,7 +448,7 @@ def deliver_provider(c,key,cfg,provider,folder,video,meta):
         else: telegram_event(cfg,folder,video,meta,part)
         mark_delivery(c,key,provider,part)
     if not delivery_done(c,key,provider,'location'):
-        delivered=send_location(cfg,meta) if provider=='whatsapp' else telegram_location(cfg,meta)
+        delivered=send_location(cfg,meta) if provider=='whatsapp' else False
         # No valid location is a completed optional part.
         mark_delivery(c,key,provider,'location')
 
