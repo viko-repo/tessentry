@@ -98,11 +98,15 @@ def send_part(cfg,folder,video,meta,part):
         req=urllib.request.Request(f'{base}/api/sessions/{session}/messages/send-text',body,{**headers,'Content-Type':'application/json'},method='POST')
         with urllib.request.urlopen(req,timeout=30) as resp: resp.read()
     elif part=='video':
-        boundary='----Tessentry'+uuid.uuid4().hex
-        def field(k,v): return (f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n').encode()
-        payload=field('chatId',chat)+field('caption','Tesla Sentry event')
-        payload+=(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="event.mp4"\r\nContent-Type: video/mp4\r\n\r\n').encode()+video.read_bytes()+b'\r\n'+f'--{boundary}--\r\n'.encode()
-        req=urllib.request.Request(f'{base}/api/sessions/{session}/messages/send-file',payload,{**headers,'Content-Type':'multipart/form-data; boundary='+boundary},method='POST')
+        import base64
+        body=json.dumps({
+            'chatId':chat,
+            'base64':base64.b64encode(video.read_bytes()).decode('ascii'),
+            'mimetype':'video/mp4',
+            'filename':'event.mp4',
+            'caption':'Tesla Sentry event'
+        }).encode()
+        req=urllib.request.Request(f'{base}/api/sessions/{session}/messages/send-video',body,{**headers,'Content-Type':'application/json'},method='POST')
         with urllib.request.urlopen(req,timeout=90) as resp: resp.read()
     else: raise ValueError('Unknown message part')
 
