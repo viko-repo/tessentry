@@ -177,7 +177,11 @@ RestartSec=10
 NoNewPrivileges=true
 ProtectSystem=strict
 ReadWritePaths=/mutable/tessentry
-PrivateTmp=true
+
+# Sentry-USB-Rusty exposes TeslaCam event clips through /tmp/snapshots.
+# The worker must share the host /tmp namespace to access these clips.
+# PrivateTmp=true prevents access to snapshot-backed event videos.
+PrivateTmp=false
 
 [Install]
 WantedBy=multi-user.target
@@ -231,4 +235,3 @@ echo "Services are enabled for automatic startup."
 echo "A controlled reboot is recommended."
 echo "Do not expose port 8788 to the public Internet."
 echo "=============================================="
-
