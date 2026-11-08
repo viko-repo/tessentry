@@ -1,237 +1,278 @@
 
 #!/usr/bin/env bash
+# Tessentry safe updater.
+# Preserves persistent data and fixes Sentry snapshot access.
 set -Eeuo pipefail
 
-# Tessentry installer for Sentry-USB-Rusty.
-# Does not modify archiveloop or TeslaCam recordings.
-
 [[ $EUID -eq 0 ]] || {
-  echo "Run: sudo bash install.sh"
+  echo 'Run as root (sudo)' >&2
   exit 1
 }
 
-SRC="$(cd "$(dirname "$0")" && pwd)"
+for cmd in python3 tar systemctl mount findmnt flock; do
+  command -v "$cmd" >/dev/null || {
+    echo "Missing: $cmd" >&2
+    exit 1
+  }
+done
 
-[[ -f "$SRC/tessentry/core.py" ]] || {
-  echo "Run from the extracted Tessentry project directory"
+mountpoint -q /mutable && [[ -w /mutable ]] || {
+  echo '/mutable must be writable' >&2
   exit 1
 }
 
-command -v python3 >/dev/null || {
-  echo "ERROR: Python 3 is required"
+[[ -d /opt/tessentry/tessentry ]] || {
+  echo 'Tessentry is not installed' >&2
   exit 1
 }
 
-command -v findmnt >/dev/null || {
-  echo "ERROR: findmnt is required"
+for svc in tessentry-worker.service tessentry-web.service; do
+  [[ -f /etc/systemd/system/$svc ]] || {
+    echo "Missing service: $svc" >&2
+    exit 1
+  }
+done
+
+SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+[[ -f "$SRC/tessentry/core.py" && -f "$SRC/tessentry/web.py" ]] || {
+  echo 'Source code missing' >&2
   exit 1
 }
 
-mountpoint -q /mutable || {
-  echo "ERROR: /mutable is not mounted"
+mkdir -p /mutable/tessentry/upgrade-backups
+chmod 700 /mutable/tessentry/upgrade-backups
+
+exec 9>/mutable/tessentry/upgrade-backups/update.lock
+flock -n 9 || {
+  echo 'Another update is running' >&2
   exit 1
 }
 
-[[ -w /mutable ]] || {
-  echo "ERROR: /mutable is not writable"
-  exit 1
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+
+BACKUP="/mutable/tessentry/upgrade-backups/code-$STAMP.tar.gz"
+STATE_BACKUP="/mutable/tessentry/upgrade-backups/state-$STAMP.tar.gz"
+
+PREVIOUS="/opt/tessentry/.previous-$STAMP"
+STAGE="/opt/tessentry/.stage-$STAMP"
+
+# Permanent systemd fix for snapshot-backed Sentry videos.
+WORKER_DROPIN_DIR="/etc/systemd/system/tessentry-worker.service.d"
+WORKER_DROPIN="$WORKER_DROPIN_DIR/10-snapshot-access.conf"
+
+DROPIN_BACKUP="/mutable/tessentry/upgrade-backups/worker-dropin-$STAMP.conf"
+
+ROOT_CHANGED=0
+BOOT_CHANGED=0
+SWAPPED=0
+STOPPED=0
+SUCCESS=0
+DROPIN_CHANGED=0
+DROPIN_EXISTED=0
+
+is_ro() {
+  [[ ",$(findmnt -no OPTIONS "$1")," == *,ro,* ]]
 }
 
-command -v tailscale >/dev/null || {
-  echo "ERROR: Tailscale is required"
-  exit 1
-}
+ROOT_RO=0
+BOOT_RO=0
 
-TAILSCALE_IP="$(tailscale ip -4 | head -n 1)"
+is_ro / && ROOT_RO=1
 
-[[ "$TAILSCALE_IP" =~ ^100\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-  echo "ERROR: No Tailscale IPv4 address"
-  exit 1
-}
-
-INITIAL_ROOT_OPTS="$(findmnt -no OPTIONS /)"
-INITIAL_BOOT_OPTS="$(findmnt -no OPTIONS /boot/firmware)"
-
-ROOT_WAS_RO=0
-BOOT_WAS_RO=0
-
-[[ ",$INITIAL_ROOT_OPTS," == *,ro,* ]] && ROOT_WAS_RO=1
-[[ ",$INITIAL_BOOT_OPTS," == *,ro,* ]] && BOOT_WAS_RO=1
+if mountpoint -q /boot/firmware && is_ro /boot/firmware; then
+  BOOT_RO=1
+fi
 
 cleanup() {
   local rc=$?
-  trap - EXIT
+  trap - EXIT INT TERM
 
-  sync
+  if (( ! SUCCESS )); then
+    echo 'Update failed; restoring previous installation...' >&2
 
-  if (( BOOT_WAS_RO )); then
-    if ! mount -o remount,ro /boot/firmware; then
-      echo "CRITICAL: Failed to restore /boot/firmware to RO" >&2
-      rc=1
+    if (( SWAPPED )); then
+      rm -rf /opt/tessentry/tessentry || rc=1
+
+      if [[ -d "$PREVIOUS" ]]; then
+        mv "$PREVIOUS" /opt/tessentry/tessentry || rc=1
+      else
+        echo 'Previous code missing!' >&2
+        rc=1
+      fi
+    fi
+
+    # Restore the previous systemd override.
+    if (( DROPIN_CHANGED )); then
+      if (( DROPIN_EXISTED )); then
+        cp -a "$DROPIN_BACKUP" "$WORKER_DROPIN" || rc=1
+      else
+        rm -f "$WORKER_DROPIN" || rc=1
+      fi
+
+      systemctl daemon-reload || rc=1
+    fi
+
+    if (( STOPPED )); then
+      systemctl restart \
+        tessentry-worker.service \
+        tessentry-web.service || rc=1
     fi
   fi
 
-  if (( ROOT_WAS_RO )); then
-    if ! mount -o remount,ro /; then
-      echo "CRITICAL: Failed to restore / to RO" >&2
-      rc=1
-    fi
+  if [[ -e "$STAGE" ]]; then
+    rm -rf "$STAGE" || rc=1
+  fi
+
+  if (( BOOT_CHANGED )); then
+    mount -o remount,ro /boot/firmware || rc=1
+  fi
+
+  if (( ROOT_CHANGED )); then
+    mount -o remount,ro / || rc=1
+  fi
+
+  if (( SUCCESS )); then
+    echo
+    echo "Update successful."
+    echo "Code backup: $BACKUP"
+    echo "Persistent data backup: $STATE_BACKUP"
+    echo "Worker snapshot access: PrivateTmp=no"
   fi
 
   exit "$rc"
 }
 
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-echo "Preparing SentryUSB filesystem..."
+echo "Validating Tessentry Python code..."
 
-if (( ROOT_WAS_RO )); then
-  if [[ -x /root/bin/remountfs_rw ]]; then
-    /root/bin/remountfs_rw
-  else
-    mount -o remount,rw /
-  fi
-fi
-
-echo "Installing FFmpeg dependencies..."
-
-if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
-  apt-get update
-  DEBIAN_FRONTEND=noninteractive apt-get install -y ffmpeg
-fi
-
-echo "Creating Tessentry system user..."
-
-if ! id tessentry >/dev/null 2>&1; then
-  useradd --system \
-    --home-dir /mutable/tessentry \
-    --shell /usr/sbin/nologin \
-    tessentry
-fi
-
-install -d -m 750 -o tessentry -g tessentry /mutable/tessentry
-install -d -m 755 /opt/tessentry
-
-echo "Installing Tessentry application..."
-# Keep an on-device copy of the previous application for manual rollback.
-if [[ -d /opt/tessentry/tessentry ]]; then
-  install -d -m 700 /mutable/tessentry/upgrade-backups
-  BACKUP_FILE="/mutable/tessentry/upgrade-backups/tessentry-code-$(date +%Y%m%d-%H%M%S).tar.gz"
-  tar -czf "$BACKUP_FILE" -C /opt/tessentry tessentry
-  echo "Previous code backup: $BACKUP_FILE"
-fi
-
-cp -a "$SRC/tessentry" /opt/tessentry/
-
-chown -R root:root /opt/tessentry
-find /opt/tessentry -type d -exec chmod 755 {} +
-find /opt/tessentry -type f -exec chmod 644 {} +
-
-if [[ ! -f /mutable/tessentry/password.hash ]]; then
-  echo "Generating Tessentry admin password..."
-
-  PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(18))')"
-
-  TESSENTRY_PASS="$PASSWORD" python3 - <<'PYI'
-import os
+python3 - "$SRC/tessentry" <<'PY'
+import pathlib
 import sys
 
-sys.path.insert(0, "/opt/tessentry")
-from tessentry.web import hash_password
+for p in pathlib.Path(sys.argv[1]).rglob('*.py'):
+    compile(p.read_bytes(), str(p), 'exec')
 
-with open("/mutable/tessentry/password.hash", "w") as f:
-    f.write(hash_password(os.environ["TESSENTRY_PASS"]) + "\n")
-PYI
+print('Python syntax: OK')
+PY
 
-  chmod 600 /mutable/tessentry/password.hash
+echo "Backing up installed application..."
 
-  echo
-  echo "=============================================="
-  echo "TESSENTRY ADMIN PASSWORD"
-  echo "$PASSWORD"
-  echo "SAVE THIS PASSWORD SECURELY"
-  echo "=============================================="
-  echo
+tar -czf "$BACKUP" -C /opt/tessentry tessentry
+chmod 600 "$BACKUP"
+
+echo "Backing up persistent state..."
+
+if [[ -d /mutable/tessentry ]]; then
+  tar -czf "$STATE_BACKUP" \
+    --exclude='./tessentry/upgrade-backups' \
+    --exclude='*.mp4' \
+    -C /mutable ./tessentry
+
+  chmod 600 "$STATE_BACKUP"
 fi
 
-chown -R tessentry:tessentry /mutable/tessentry
-chmod 750 /mutable/tessentry
+echo "Preparing filesystem..."
 
-echo "Installing Tessentry worker service..."
+if (( ROOT_RO )); then
+  mount -o remount,rw /
+  ROOT_CHANGED=1
+fi
 
-cat >/etc/systemd/system/tessentry-worker.service <<'UNIT'
-[Unit]
-Description=Tessentry event monitor
-After=network-online.target tailscaled.service
-Wants=network-online.target tailscaled.service
+# /boot/firmware is not modified by this updater.
 
+echo "Staging new application code..."
+
+mkdir -p "$STAGE"
+cp -a "$SRC/tessentry/." "$STAGE/"
+
+chown -R root:root "$STAGE"
+find "$STAGE" -type d -exec chmod 755 {} +
+find "$STAGE" -type f -exec chmod 644 {} +
+
+echo "Preparing worker snapshot-access fix..."
+
+# Preserve an existing override before changing it.
+if [[ -f "$WORKER_DROPIN" ]]; then
+  cp -a "$WORKER_DROPIN" "$DROPIN_BACKUP"
+  chmod 600 "$DROPIN_BACKUP"
+  DROPIN_EXISTED=1
+fi
+
+echo "Stopping Tessentry services..."
+
+STOPPED=1
+systemctl stop tessentry-worker.service tessentry-web.service
+
+echo "Installing updated application..."
+
+mv /opt/tessentry/tessentry "$PREVIOUS"
+
+# Mark before the second move so rollback covers failures.
+SWAPPED=1
+
+mv "$STAGE" /opt/tessentry/tessentry
+
+echo "Applying permanent Sentry snapshot-access fix..."
+
+mkdir -p "$WORKER_DROPIN_DIR"
+
+DROPIN_CHANGED=1
+
+cat >"$WORKER_DROPIN" <<'UNIT'
 [Service]
-Type=simple
-User=tessentry
-Group=tessentry
-Environment=PYTHONPATH=/opt/tessentry
-Environment=TESSENTRY_DATA=/mutable/tessentry
-ExecStart=/usr/bin/python3 -m tessentry worker
-Restart=always
-RestartSec=10
-NoNewPrivileges=true
-ProtectSystem=strict
-ReadWritePaths=/mutable/tessentry
-
-# Sentry-USB-Rusty exposes TeslaCam event clips through /tmp/snapshots.
-# The worker must share the host /tmp namespace to access these clips.
-# PrivateTmp=true prevents access to snapshot-backed event videos.
-PrivateTmp=false
-
-[Install]
-WantedBy=multi-user.target
+# Sentry-USB-Rusty exposes snapshot-backed clips via /tmp/snapshots.
+# The worker must share the host temporary-file namespace.
+PrivateTmp=no
 UNIT
 
-echo "Installing Tessentry web service..."
-
-cat >/etc/systemd/system/tessentry-web.service <<UNIT
-[Unit]
-Description=Tessentry management UI
-After=network-online.target tailscaled.service
-Wants=network-online.target tailscaled.service
-
-[Service]
-Type=simple
-User=tessentry
-Group=tessentry
-Environment=PYTHONPATH=/opt/tessentry
-Environment=TESSENTRY_DATA=/mutable/tessentry
-Environment=TESSENTRY_BIND=${TAILSCALE_IP}
-Environment=TESSENTRY_PORT=8788
-ExecStart=/usr/bin/python3 -m tessentry web
-TimeoutStartSec=120
-Restart=always
-RestartSec=10
-NoNewPrivileges=true
-ProtectSystem=strict
-ReadWritePaths=/mutable/tessentry
-PrivateTmp=true
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-echo "Enabling Tessentry services..."
+chmod 644 "$WORKER_DROPIN"
 
 systemctl daemon-reload
-systemctl enable tessentry-worker.service tessentry-web.service
-# --now does not restart services that are already running after an upgrade.
-systemctl restart tessentry-worker.service tessentry-web.service
+
+echo "Verifying effective worker configuration..."
+
+WORKER_PRIVATE_TMP="$(
+  systemctl show \
+    -p PrivateTmp \
+    --value \
+    tessentry-worker.service
+)"
+
+[[ "$WORKER_PRIVATE_TMP" == "no" || "$WORKER_PRIVATE_TMP" == "false" ]] || {
+  echo "ERROR: Worker PrivateTmp is still enabled" >&2
+  exit 1
+}
+
+echo "Starting Tessentry services..."
+
+systemctl restart \
+  tessentry-worker.service \
+  tessentry-web.service
+
+sleep 3
+
 systemctl is-active --quiet tessentry-worker.service
 systemctl is-active --quiet tessentry-web.service
 
+# Verify that both processes survive initial startup.
+sleep 3
+
+systemctl is-active --quiet tessentry-worker.service
+systemctl is-active --quiet tessentry-web.service
+
+SUCCESS=1
+
 echo
 echo "=============================================="
-echo "TESSENTRY INSTALLATION COMPLETED"
+echo "TESSENTRY UPDATE COMPLETED"
 echo "=============================================="
-printf 'Management UI: http://%s:8788/tessentry/\n' "$TAILSCALE_IP"
-echo "Existing monitoring settings were preserved; new installations start disabled."
-echo "Services are enabled for automatic startup."
-echo "A controlled reboot is recommended."
-echo "Do not expose port 8788 to the public Internet."
+echo "Application code updated successfully."
+echo "Worker snapshot access: PrivateTmp=no"
+echo "Web service security settings preserved."
+echo "Persistent settings and event history preserved."
+echo "Previous code retained at: $PREVIOUS"
 echo "=============================================="
