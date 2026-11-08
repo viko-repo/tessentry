@@ -4,6 +4,9 @@
 
 Tessentry is a lightweight companion service for a Raspberry Pi running [Sentry-USB-Rusty](https://github.com/Sentry-Six/Sentry-USB-Rusty). It watches configured TeslaCam `SentryClips` and `SavedClips` event folders and sends event details and a short `event.mp4` clip to WhatsApp (via OpenWA), Telegram, or both. WhatsApp can receive a separate native location message; Telegram includes a clickable Google Maps link in the video caption (or text message when video is disabled), when valid coordinates are available.
 
+> [!IMPORTANT]
+> **Sentry video notifications may be delayed by approximately 58 minutes (sometimes longer).** By default, Sentry-USB-Rusty creates a snapshot of the TeslaCam virtual disk every **3,480 seconds (58 minutes)**. Tessentry can discover and send new event clips only after a snapshot exposes them. Additional archiving, processing, or network time can increase the delay. This is expected snapshot behavior, **not necessarily a Tessentry delivery failure**. Tessentry does not change Sentry-USB-Rusty’s snapshot interval.
+
 > **Start here: install Sentry-USB-Rusty first.** Tessentry is an add-on, not a replacement for the Tesla USB recorder or archive system. If Sentry-USB-Rusty is already installed and working, **do not reinstall it**.
 
 ## Installation roadmap
@@ -130,7 +133,7 @@ Return to **Status** after saving. When monitoring has been enabled, the page sh
 
 The screenshot shows a real WhatsApp notification delivered through OpenWA during a manual end-to-end test. It contains a short `event.mp4` clip and event details (date, time, reason and camera), followed by a separate native WhatsApp location card. The video and map are obscured for privacy.
 
-A later manual dual-provider test succeeded for both WhatsApp and Telegram. In Telegram, the event is delivered as a single video message with event details and a localized, clickable Google Maps link in its caption; no separate Telegram map message is sent. **Automatic unattended delivery from a newly archived Tesla event is still awaiting real-world validation.**
+A later manual dual-provider test succeeded for both WhatsApp and Telegram. In Telegram, the event is delivered as a single video message with event details and a localized, clickable Google Maps link in its caption; no separate Telegram map message is sent. **Automatic delivery of a newly exposed real Tesla Sentry event to WhatsApp was validated on November 8, 2026.** Telegram delivery was validated separately in manual testing; automatic delivery to Telegram from that same real event has not been independently confirmed.
 
 ![Actual Tessentry WhatsApp notification with video and map obscured](docs/images/06-real-whatsapp-notification.jpg)
 
@@ -140,6 +143,7 @@ A later manual dual-provider test succeeded for both WhatsApp and Telegram. In T
 - The web UI currently uses **plain HTTP**. Access it only through a trusted network/Tailscale; do **not** expose port `8788` directly to the public Internet. Prefer an encrypted reverse proxy when appropriate.
 - The installer binds to the current Tailscale IPv4 address. If that address changes, the binding must be updated.
 - Event eligibility uses the presence and age of `event.mp4`; this does **not** guarantee archiving has fully finished.
+- **Snapshot access:** The `tessentry-worker` systemd service requires `PrivateTmp=false` so it can follow Sentry-USB-Rusty snapshot-backed event paths through `/tmp/snapshots`. Keep `PrivateTmp=true` for the separate web service. The updated `install.sh` sets this for new installs; existing installations may require a separate systemd unit update because the code-only updater does not update unit definitions.
 - Missing `event.json` is permitted when `event.mp4` exists.
 - Failed or interrupted deliveries may require manual review; automatic replay is intentionally restricted to avoid duplicates.
 - The UI's OpenWA reachability indication is not a complete authenticated API health check. Check worker status with `systemctl`.
@@ -184,7 +188,8 @@ python3 -m unittest discover -s tests -v
 | Manual delivery to WhatsApp and Telegram in one test | Tested manually |
 | SQLite deduplication and initial baseline | Tested |
 | Automatic monitoring on development Pi | Enabled |
-| Fully unattended delivery from a newly archived real Tesla event | **Awaiting real-world validation** |
+| Fully unattended WhatsApp delivery from a newly exposed real Tesla Sentry event | **Validated on November 8, 2026** |
+| Fully unattended Telegram delivery from a newly exposed real Tesla Sentry event | **Not independently confirmed** |
 | Fresh installation from GitHub on a new device | **Not yet independently validated** |
 
 ## Credits
@@ -210,7 +215,7 @@ Keep a separate copy of `/mutable/tessentry/config.json`, `/mutable/tessentry/ev
 
 Delivery is tracked per provider. A successful WhatsApp notification will not be repeated when Telegram fails during the same event. Ambiguous network failures are placed in **review** and are not automatically retried, to prevent duplicates. Historical events already marked **sent** are never replayed merely because a new provider is enabled.
 
-**Validation:** Offline automated tests cover Telegram payloads, provider selection, legacy configuration, location handling and dual-provider progress. Manual live delivery of a test event to both Telegram and WhatsApp has succeeded on the target Raspberry Pi. A fresh GitHub installation and fully unattended delivery from a newly archived Tesla event still require independent validation.
+**Validation:** Offline automated tests cover Telegram payloads, provider selection, legacy configuration, location handling and dual-provider progress. Manual live delivery of a test event to both Telegram and WhatsApp has succeeded on the target Raspberry Pi. A fresh GitHub installation still requires independent validation. Fully unattended WhatsApp delivery of a real Sentry event was observed on November 8, 2026; the equivalent unattended Telegram path has not been independently confirmed.
 
 ## Updating an existing installation
 
@@ -224,4 +229,4 @@ After publishing `update.sh` and `update-from-github.sh` on the `main` branch, e
 curl -fsSL https://raw.githubusercontent.com/viko-repo/tessentry/main/update-from-github.sh | sudo bash
 ```
 
-**Security:** This executes code from the repository's current `main` branch with root privileges. Only use it if you trust the repository and its maintainers. For reproducible deployments, download and inspect a tagged release instead. Keep a separate off-device backup of your `/mutable/tessentry/` data. This updater does not upgrade OS packages, FFmpeg, or systemd unit definitions.
+**Security:** This executes code from the repository's current `main` branch with root privileges. Only use it if you trust the repository and its maintainers. For reproducible deployments, download and inspect a tagged release instead. Keep a separate off-device backup of your `/mutable/tessentry/` data. This updater does not upgrade OS packages, FFmpeg, or systemd unit definitions. **For existing installations, updating the application code alone does not apply the `PrivateTmp=false` worker fix.** Update the worker systemd unit or apply an equivalent drop-in, then reload systemd and restart only the worker when safe. The web service should retain `PrivateTmp=true`.
