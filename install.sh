@@ -252,25 +252,31 @@ PrivateTmp=true
 WantedBy=multi-user.target
 UNIT
 
-# Configure faster Sentry-USB-Rusty snapshots using a
-# systemd override, not by editing upstream source code.
-echo "Configuring 5-minute snapshot interval..."
+# Configure faster snapshots without duplicating
+# an existing effective 300-second setting.
+echo "Checking 5-minute snapshot interval..."
 
 ARCHIVE_SERVICE="sentryusb-archive.service"
+ARCHIVE_CHANGED=0
 
 if systemctl cat "$ARCHIVE_SERVICE" >/dev/null 2>&1; then
-  ARCHIVE_OVERRIDE_DIR="/etc/systemd/system/${ARCHIVE_SERVICE}.d"
+  if systemctl show "$ARCHIVE_SERVICE" -p Environment --value |
+      tr ' ' '\n' | grep -Fxq 'SNAPSHOT_INTERVAL=300'; then
+    echo "Snapshot interval already configured: 300 seconds"
+  else
+    ARCHIVE_OVERRIDE_DIR="/etc/systemd/system/${ARCHIVE_SERVICE}.d"
+    install -d -m 755 "$ARCHIVE_OVERRIDE_DIR"
 
-  install -d -m 755 "$ARCHIVE_OVERRIDE_DIR"
-
-  cat >"${ARCHIVE_OVERRIDE_DIR}/50-tessentry-snapshot-interval.conf" <<'UNIT'
+    cat >"${ARCHIVE_OVERRIDE_DIR}/50-tessentry-snapshot-interval.conf" <<'UNIT'
 [Service]
 Environment="SNAPSHOT_INTERVAL=300"
 UNIT
 
-  chmod 644 "${ARCHIVE_OVERRIDE_DIR}/50-tessentry-snapshot-interval.conf"
+    chmod 644 "${ARCHIVE_OVERRIDE_DIR}/50-tessentry-snapshot-interval.conf"
+    ARCHIVE_CHANGED=1
 
-  echo "Snapshot interval configured: 300 seconds"
+    echo "Snapshot interval configured: 300 seconds"
+  fi
 else
   echo "WARNING: sentryusb-archive.service not found."
   echo "Snapshot interval was not modified."
@@ -287,9 +293,9 @@ systemctl restart tessentry-worker.service tessentry-web.service
 systemctl is-active --quiet tessentry-worker.service
 systemctl is-active --quiet tessentry-web.service
 
-# Apply the archive interval only when the service exists.
-# This may briefly interrupt snapshot processing.
-if systemctl cat "$ARCHIVE_SERVICE" >/dev/null 2>&1; then
+# Restart the archive only if its configuration changed.
+# This avoids interrupting an already working archive.
+if (( ARCHIVE_CHANGED )); then
   if systemctl is-active --quiet "$ARCHIVE_SERVICE"; then
     echo "Restarting snapshot archive service to apply interval..."
     systemctl restart "$ARCHIVE_SERVICE"
