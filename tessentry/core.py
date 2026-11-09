@@ -148,11 +148,12 @@ def event_text(folder, meta, language='en', include_map=False):
 
     reason = data.get('reason')
     if reason:
-        description = (
-            t['reason_object']
-            if reason == 'sentry_aware_object_detection'
-            else str(reason)
-        )
+        reason_keys = {
+            'sentry_aware_object_detection': 'reason_object',
+            'sentry_locked_handle_pulled': 'reason_handle_pulled',
+            'user_interaction_honk': 'reason_honk',
+        }
+        description = t.get(reason_keys.get(reason, ''), str(reason))
         lines.append(f"{t['reason']}: {description}")
 
     camera = data.get('camera')
