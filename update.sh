@@ -254,18 +254,32 @@ UNIT
 
 chmod 644 "$WORKER_DROPIN"
 
-echo "Configuring snapshot interval..."
+echo "Checking snapshot interval..."
 
 if systemctl cat "$ARCHIVE_SERVICE" >/dev/null 2>&1; then
-  mkdir -p "$ARCHIVE_DROPIN_DIR"
-  ARCHIVE_CHANGED=1
 
-  cat >"$ARCHIVE_DROPIN" <<'UNIT'
+  # Keep the existing configuration when the effective
+  # interval is already 300 seconds.
+  if systemctl show "$ARCHIVE_SERVICE" -p Environment --value |
+      tr ' ' '\n' | grep -Fxq 'SNAPSHOT_INTERVAL=300'; then
+
+    echo "Snapshot interval already configured: 300 seconds"
+    echo "Existing archive configuration will be preserved."
+
+  else
+    mkdir -p "$ARCHIVE_DROPIN_DIR"
+    ARCHIVE_CHANGED=1
+
+    cat >"$ARCHIVE_DROPIN" <<'UNIT'
 [Service]
 Environment="SNAPSHOT_INTERVAL=300"
 UNIT
 
-  chmod 644 "$ARCHIVE_DROPIN"
+    chmod 644 "$ARCHIVE_DROPIN"
+
+    echo "Snapshot interval configured: 300 seconds"
+  fi
+
 else
   echo "WARNING: Archive service not found; snapshot interval unchanged."
 fi
@@ -297,6 +311,7 @@ sleep 3
 systemctl is-active --quiet tessentry-worker.service
 systemctl is-active --quiet tessentry-web.service
 
+# Only restart the archive if its configuration changed.
 if (( ARCHIVE_CHANGED && ARCHIVE_WAS_ACTIVE )); then
   echo "Restarting archive service to apply snapshot interval..."
   systemctl restart "$ARCHIVE_SERVICE"
