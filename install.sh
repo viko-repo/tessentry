@@ -2,8 +2,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Tessentry installer for Sentry-USB-Rusty.
-# Does not modify archiveloop or TeslaCam recordings.
+# Tessentry v1.3.0 installer for Sentry-USB-Rusty.
+# Does not modify archiveloop, TeslaCam recordings,
+# or the original Sentry-USB-Rusty service files.
 
 [[ $EUID -eq 0 ]] || {
   echo "Run: sudo bash install.sh"
@@ -13,19 +14,16 @@ set -Eeuo pipefail
 SRC="$(cd "$(dirname "$0")" && pwd)"
 
 [[ -f "$SRC/tessentry/core.py" ]] || {
-  echo "Run from the extracted Tessentry project directory"
+  echo "ERROR: Run from the Tessentry project directory"
   exit 1
 }
 
-command -v python3 >/dev/null || {
-  echo "ERROR: Python 3 is required"
-  exit 1
-}
-
-command -v findmnt >/dev/null || {
-  echo "ERROR: findmnt is required"
-  exit 1
-}
+for cmd in python3 findmnt mountpoint systemctl tar; do
+  command -v "$cmd" >/dev/null || {
+    echo "ERROR: Required command missing: $cmd"
+    exit 1
+  }
+done
 
 mountpoint -q /mutable || {
   echo "ERROR: /mutable is not mounted"
@@ -49,6 +47,29 @@ TAILSCALE_IP="$(tailscale ip -4 | head -n 1)"
   exit 1
 }
 
+# Validate application files before modifying the system.
+echo "Validating Tessentry application..."
+
+python3 - "$SRC" <<'PY'
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1]) / "tessentry"
+
+for name in ("core.py", "web.py", "__main__.py", "__init__.py"):
+    path = root / name
+    compile(path.read_bytes(), str(path), "exec")
+
+for lang in ("en", "he"):
+    path = root / "locales" / f"{lang}.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"Invalid locale: {lang}")
+
+print("Python and locale validation: OK")
+PY
+
 INITIAL_ROOT_OPTS="$(findmnt -no OPTIONS /)"
 INITIAL_BOOT_OPTS="$(findmnt -no OPTIONS /boot/firmware)"
 
@@ -66,14 +87,14 @@ cleanup() {
 
   if (( BOOT_WAS_RO )); then
     if ! mount -o remount,ro /boot/firmware; then
-      echo "CRITICAL: Failed to restore /boot/firmware to RO" >&2
+      echo "CRITICAL: Failed to restore boot filesystem to RO" >&2
       rc=1
     fi
   fi
 
   if (( ROOT_WAS_RO )); then
     if ! mount -o remount,ro /; then
-      echo "CRITICAL: Failed to restore / to RO" >&2
+      echo "CRITICAL: Failed to restore root filesystem to RO" >&2
       rc=1
     fi
   fi
@@ -93,9 +114,19 @@ if (( ROOT_WAS_RO )); then
   fi
 fi
 
+# If boot was originally read-only, ensure it is writable
+# during installation. The cleanup trap restores its state.
+if (( BOOT_WAS_RO )); then
+  CURRENT_BOOT_OPTS="$(findmnt -no OPTIONS /boot/firmware)"
+  if [[ ",$CURRENT_BOOT_OPTS," == *,ro,* ]]; then
+    mount -o remount,rw /boot/firmware
+  fi
+fi
+
 echo "Installing FFmpeg dependencies..."
 
-if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
+if ! command -v ffmpeg >/dev/null 2>&1 ||
+   ! command -v ffprobe >/dev/null 2>&1; then
   apt-get update
   DEBIAN_FRONTEND=noninteractive apt-get install -y ffmpeg
 fi
@@ -113,20 +144,27 @@ install -d -m 750 -o tessentry -g tessentry /mutable/tessentry
 install -d -m 755 /opt/tessentry
 
 echo "Installing Tessentry application..."
-# Keep an on-device copy of the previous application for manual rollback.
+
+# Preserve the previous application for manual rollback.
 if [[ -d /opt/tessentry/tessentry ]]; then
   install -d -m 700 /mutable/tessentry/upgrade-backups
+
   BACKUP_FILE="/mutable/tessentry/upgrade-backups/tessentry-code-$(date +%Y%m%d-%H%M%S).tar.gz"
+
   tar -czf "$BACKUP_FILE" -C /opt/tessentry tessentry
+
   echo "Previous code backup: $BACKUP_FILE"
 fi
 
+# Replace application code without touching persistent data.
+rm -rf /opt/tessentry/tessentry
 cp -a "$SRC/tessentry" /opt/tessentry/
 
-chown -R root:root /opt/tessentry
-find /opt/tessentry -type d -exec chmod 755 {} +
-find /opt/tessentry -type f -exec chmod 644 {} +
+chown -R root:root /opt/tessentry/tessentry
+find /opt/tessentry/tessentry -type d -exec chmod 755 {} +
+find /opt/tessentry/tessentry -type f -exec chmod 644 {} +
 
+# Preserve existing credentials.
 if [[ ! -f /mutable/tessentry/password.hash ]]; then
   echo "Generating Tessentry admin password..."
 
@@ -178,9 +216,7 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ReadWritePaths=/mutable/tessentry
 
-# Sentry-USB-Rusty exposes TeslaCam event clips through /tmp/snapshots.
-# The worker must share the host /tmp namespace to access these clips.
-# PrivateTmp=true prevents access to snapshot-backed event videos.
+# The worker needs access to /tmp/snapshots.
 PrivateTmp=false
 
 [Install]
@@ -216,21 +252,61 @@ PrivateTmp=true
 WantedBy=multi-user.target
 UNIT
 
+# Configure faster Sentry-USB-Rusty snapshots using a
+# systemd override, not by editing upstream source code.
+echo "Configuring 5-minute snapshot interval..."
+
+ARCHIVE_SERVICE="sentryusb-archive.service"
+
+if systemctl cat "$ARCHIVE_SERVICE" >/dev/null 2>&1; then
+  ARCHIVE_OVERRIDE_DIR="/etc/systemd/system/${ARCHIVE_SERVICE}.d"
+
+  install -d -m 755 "$ARCHIVE_OVERRIDE_DIR"
+
+  cat >"${ARCHIVE_OVERRIDE_DIR}/50-tessentry-snapshot-interval.conf" <<'UNIT'
+[Service]
+Environment="SNAPSHOT_INTERVAL=300"
+UNIT
+
+  chmod 644 "${ARCHIVE_OVERRIDE_DIR}/50-tessentry-snapshot-interval.conf"
+
+  echo "Snapshot interval configured: 300 seconds"
+else
+  echo "WARNING: sentryusb-archive.service not found."
+  echo "Snapshot interval was not modified."
+fi
+
 echo "Enabling Tessentry services..."
 
 systemctl daemon-reload
+
 systemctl enable tessentry-worker.service tessentry-web.service
-# --now does not restart services that are already running after an upgrade.
+
 systemctl restart tessentry-worker.service tessentry-web.service
+
 systemctl is-active --quiet tessentry-worker.service
 systemctl is-active --quiet tessentry-web.service
 
+# Apply the archive interval only when the service exists.
+# This may briefly interrupt snapshot processing.
+if systemctl cat "$ARCHIVE_SERVICE" >/dev/null 2>&1; then
+  if systemctl is-active --quiet "$ARCHIVE_SERVICE"; then
+    echo "Restarting snapshot archive service to apply interval..."
+    systemctl restart "$ARCHIVE_SERVICE"
+    systemctl is-active --quiet "$ARCHIVE_SERVICE"
+  else
+    echo "Archive service is not running; interval applies on next start."
+  fi
+fi
+
 echo
 echo "=============================================="
-echo "TESSENTRY INSTALLATION COMPLETED"
+echo "TESSENTRY v1.3.0 INSTALLATION COMPLETED"
 echo "=============================================="
 printf 'Management UI: http://%s:8788/tessentry/\n' "$TAILSCALE_IP"
-echo "Existing monitoring settings were preserved; new installations start disabled."
+echo "Existing monitoring settings and data were preserved."
+echo "Worker snapshot access: enabled."
+echo "Snapshot interval: 300 seconds (when supported)."
 echo "Services are enabled for automatic startup."
 echo "A controlled reboot is recommended."
 echo "Do not expose port 8788 to the public Internet."
