@@ -8,5 +8,7 @@
   "reason_object": "זוהה אובייקט (Sentry)",
   "camera_front": "קדמית",
   "camera_left": "צד שמאל (נהג)",
-  "camera_right": "צד ימין (נוסע)"
+  "camera_right": "צד ימין (נוסע)",
+  "reason_handle_pulled": "ניסיון לפתוח דלת כשהרכב נעול",
+  "reason_honk": "צפירה בצופר הרכב"
 }

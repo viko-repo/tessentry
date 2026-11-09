@@ -8,5 +8,7 @@
   "reason_object": "Object detected (Sentry)",
   "camera_front": "Front",
   "camera_left": "Left fender (driver)",
-  "camera_right": "Right fender (passenger)"
+  "camera_right": "Right fender (passenger)",
+  "reason_handle_pulled": "Door handle pulled while vehicle locked",
+  "reason_honk": "Vehicle horn sounded"
 }
