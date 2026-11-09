@@ -5,7 +5,7 @@
 Tessentry is a lightweight companion service for a Raspberry Pi running [Sentry-USB-Rusty](https://github.com/Sentry-Six/Sentry-USB-Rusty). It watches configured TeslaCam `SentryClips` and `SavedClips` event folders and sends event details and a short `event.mp4` clip to WhatsApp (via OpenWA), Telegram, or both. WhatsApp can receive a separate native location message; Telegram includes a clickable Google Maps link in the video caption (or text message when video is disabled), when valid coordinates are available.
 
 > [!IMPORTANT]
-> **Sentry video notifications may be delayed by approximately 58 minutes (sometimes longer).** By default, Sentry-USB-Rusty creates a snapshot of the TeslaCam virtual disk every **3,480 seconds (58 minutes)**. Tessentry can discover and send new event clips only after a snapshot exposes them. Additional archiving, processing, or network time can increase the delay. This is expected snapshot behavior, **not necessarily a Tessentry delivery failure**. Tessentry does not change Sentry-USB-Rusty’s snapshot interval.
+> **Notifications are not instantaneous.** Tessentry v1.3.0 configures a **300-second (5-minute) snapshot interval** for `sentryusb-archive.service` when needed, or preserves an existing effective 300-second setting. The actual delay can exceed five minutes because snapshot creation, archiving, worker scanning, processing and network delivery take additional time. In one live test on November 9, 2026, a 22:29 event was delivered to WhatsApp and Telegram around 22:32. This is an example, **not a guaranteed delivery time**. If the five-minute override is not active, Sentry-USB-Rusty's original 3,480-second (~58-minute) interval may still apply. Tessentry does not edit the upstream `archiveloop` script.
 
 > **Start here: install Sentry-USB-Rusty first.** Tessentry is an add-on, not a replacement for the Tesla USB recorder or archive system. If Sentry-USB-Rusty is already installed and working, **do not reinstall it**.
 
@@ -25,7 +25,7 @@ Follow the **[official Sentry-USB-Rusty installation instructions](https://githu
 1. Install and configure Sentry-USB-Rusty according to its official guide.
 2. Confirm the Pi is working with your Tesla and that recordings/events are being archived.
 3. Confirm the locations of the `SentryClips` and `SavedClips` folders on **your** installation.
-4. Keep Sentry-USB-Rusty running; Tessentry does not replace or reconfigure its archiving service.
+4. Keep Sentry-USB-Rusty running. Tessentry does not replace its archiving service, but v1.3.0 can set its snapshot interval through a systemd drop-in.
 
 **Important:** The upstream project notes that Tesla dashcam encryption can prevent Sentry USB from reading recordings. Review its current compatibility guidance before troubleshooting missing events.
 
@@ -51,9 +51,9 @@ cd tessentry
 sudo bash install.sh
 ```
 
-The installer checks that `/mutable` is writable, temporarily makes the root filesystem writable when needed, installs FFmpeg if required, installs Tessentry and its systemd services, and attempts to restore the original read-only state. It prints a generated administrator password on first installation; **save it securely**. Existing configuration and password are retained on subsequent installations.
+The installer checks that `/mutable` is writable, temporarily makes the root filesystem writable when needed, installs FFmpeg if required, installs Tessentry and its systemd services, configures the archive snapshot interval if needed, and attempts to restore the original read-only state. It prints a generated administrator password on first installation; **save it securely**. Existing configuration and password are retained on subsequent installations.
 
-> **Installation status:** A fresh install directly from this GitHub repository has not yet been independently validated. Use a backup and review the installer before deployment.
+> **Installation status:** The v1.3.0 fresh installer and failure rollback paths have not yet been independently validated on a separate Pi. Use a backup and review the installer before deployment.
 
 ### Step 5 — Configure and enable monitoring
 
@@ -79,7 +79,7 @@ Sign in with the installation password, select **WhatsApp (OpenWA)**, **Telegram
 - Password-protected web UI for settings and status.
 - SQLite-backed event tracking to avoid duplicate sends.
 - Keeps Tessentry configuration and history under `/mutable/tessentry`.
-- Does not intentionally modify TeslaCam recordings, Sentry-USB-Rusty `archiveloop`, or snapshots.
+- Does not intentionally modify TeslaCam recordings or Sentry-USB-Rusty's `archiveloop` source. Version 1.3.0 can change the archive service's snapshot **interval** using a systemd drop-in.
 
 ## Setup walkthrough — real screenshots
 
@@ -133,7 +133,7 @@ Return to **Status** after saving. When monitoring has been enabled, the page sh
 
 The screenshot shows a real WhatsApp notification delivered through OpenWA during a manual end-to-end test. It contains a short `event.mp4` clip and event details (date, time, reason and camera), followed by a separate native WhatsApp location card. The video and map are obscured for privacy.
 
-A later manual dual-provider test succeeded for both WhatsApp and Telegram. In Telegram, the event is delivered as a single video message with event details and a localized, clickable Google Maps link in its caption; no separate Telegram map message is sent. **Automatic delivery of a newly exposed real Tesla Sentry event to WhatsApp was validated on November 8, 2026.** Telegram delivery was validated separately in manual testing; automatic delivery to Telegram from that same real event has not been independently confirmed.
+A later manual dual-provider test succeeded for both WhatsApp and Telegram. In Telegram, the event is delivered as a single video message with event details and a localized, clickable Google Maps link in its caption; no separate Telegram map message is sent. **Automatic delivery of a newly exposed real Tesla Sentry event to both WhatsApp and Telegram was observed on November 9, 2026.** A 22:29 event produced notifications around 22:32. Delivery times vary.
 
 ![Actual Tessentry WhatsApp notification with video and map obscured](docs/images/06-real-whatsapp-notification.jpg)
 
@@ -143,7 +143,7 @@ A later manual dual-provider test succeeded for both WhatsApp and Telegram. In T
 - The web UI currently uses **plain HTTP**. Access it only through a trusted network/Tailscale; do **not** expose port `8788` directly to the public Internet. Prefer an encrypted reverse proxy when appropriate.
 - The installer binds to the current Tailscale IPv4 address. If that address changes, the binding must be updated.
 - Event eligibility uses the presence and age of `event.mp4`; this does **not** guarantee archiving has fully finished.
-- **Snapshot access:** The `tessentry-worker` systemd service requires `PrivateTmp=false` so it can follow Sentry-USB-Rusty snapshot-backed event paths through `/tmp/snapshots`. Keep `PrivateTmp=true` for the separate web service. The updated `install.sh` sets this for new installs; existing installations may require a separate systemd unit update because the code-only updater does not update unit definitions.
+- **Snapshot access:** The `tessentry-worker` systemd service requires `PrivateTmp=false` so it can follow Sentry-USB-Rusty snapshot-backed event paths through `/tmp/snapshots`. Keep `PrivateTmp=true` for the separate web service. The updated `install.sh` sets this for new installs, and `update.sh` adds a worker systemd drop-in for existing installations. The web service retains `PrivateTmp=true`.
 - Missing `event.json` is permitted when `event.mp4` exists.
 - Failed or interrupted deliveries may require manual review; automatic replay is intentionally restricted to avoid duplicates.
 - The UI's OpenWA reachability indication is not a complete authenticated API health check. Check worker status with `systemctl`.
@@ -188,8 +188,8 @@ python3 -m unittest discover -s tests -v
 | Manual delivery to WhatsApp and Telegram in one test | Tested manually |
 | SQLite deduplication and initial baseline | Tested |
 | Automatic monitoring on development Pi | Enabled |
-| Fully unattended WhatsApp delivery from a newly exposed real Tesla Sentry event | **Validated on November 8, 2026** |
-| Fully unattended Telegram delivery from a newly exposed real Tesla Sentry event | **Not independently confirmed** |
+| Fully unattended WhatsApp delivery from a newly exposed real Tesla Sentry event | **Validated November 8 and observed again November 9, 2026** |
+| Fully unattended Telegram delivery from a newly exposed real Tesla Sentry event | **Observed November 9, 2026** |
 | Fresh installation from GitHub on a new device | **Not yet independently validated** |
 
 ## Credits
@@ -215,11 +215,23 @@ Keep a separate copy of `/mutable/tessentry/config.json`, `/mutable/tessentry/ev
 
 Delivery is tracked per provider. A successful WhatsApp notification will not be repeated when Telegram fails during the same event. Ambiguous network failures are placed in **review** and are not automatically retried, to prevent duplicates. Historical events already marked **sent** are never replayed merely because a new provider is enabled.
 
-**Validation:** Offline automated tests cover Telegram payloads, provider selection, legacy configuration, location handling and dual-provider progress. Manual live delivery of a test event to both Telegram and WhatsApp has succeeded on the target Raspberry Pi. A fresh GitHub installation still requires independent validation. Fully unattended WhatsApp delivery of a real Sentry event was observed on November 8, 2026; the equivalent unattended Telegram path has not been independently confirmed.
+**Validation:** Offline automated tests cover Telegram payloads, provider selection, legacy configuration, location handling and dual-provider progress. Manual live delivery of a test event to both Telegram and WhatsApp has succeeded on the target Raspberry Pi. A fresh GitHub installation still requires independent validation. Fully unattended delivery of a real Sentry event to both WhatsApp and Telegram was observed on November 9, 2026.
 
 ## Updating an existing installation
 
-Download the latest release ZIP from this repository, extract it, and run `sudo bash update.sh` from the extracted project directory on your Raspberry Pi. The updater validates Python syntax, backs up existing code and persistent state under `/mutable/tessentry/upgrade-backups/`, installs the new code, and checks both systemd services. It preserves `/mutable/tessentry/config.json`, the admin password and the event database. If a service fails to start, the previous application code is restored. The updater restores the original read-only filesystem mount state. **This is an offline updater for an already-downloaded release, not yet a one-command network updater.**
+Download the latest release ZIP from this repository, extract it, and run `sudo bash update.sh` from the extracted project directory on your Raspberry Pi. The updater validates Python syntax, backs up existing code and persistent state under `/mutable/tessentry/upgrade-backups/`, installs the new code, and checks both systemd services. It preserves `/mutable/tessentry/config.json`, the admin password and the event database. If a service fails to start, the previous application code is restored. The updater restores the original read-only filesystem mount state. **This script updates a locally downloaded project; `update-from-github.sh` provides the network-based update path described below.**
+
+### Snapshot interval and upgrade behavior (v1.3.0)
+
+The installer and updater target `sentryusb-archive.service`, whose `ExecStart` should run the Sentry-USB-Rusty `archiveloop`. They inspect the effective systemd environment and preserve an existing `SNAPSHOT_INTERVAL=300` setting. Otherwise, they create `/etc/systemd/system/sentryusb-archive.service.d/50-tessentry-snapshot-interval.conf`. When they add that override, they restart the archive service if it is active so the new interval takes effect. This restart can temporarily interrupt archiving; schedule upgrades accordingly. They do **not** modify `/root/bin/archiveloop`.
+
+Check the effective setting with:
+
+```bash
+systemctl show sentryusb-archive.service -p Environment -p DropInPaths
+```
+
+Expected environment: `SNAPSHOT_INTERVAL=300`. Confirm actual snapshot creation and notification delivery separately; this systemd output alone does not prove the archive loop uses the setting.
 
 ### One-command GitHub update
 
@@ -229,4 +241,4 @@ After publishing `update.sh` and `update-from-github.sh` on the `main` branch, e
 curl -fsSL https://raw.githubusercontent.com/viko-repo/tessentry/main/update-from-github.sh | sudo bash
 ```
 
-**Security:** This executes code from the repository's current `main` branch with root privileges. Only use it if you trust the repository and its maintainers. For reproducible deployments, download and inspect a tagged release instead. Keep a separate off-device backup of your `/mutable/tessentry/` data. This updater does not upgrade OS packages, FFmpeg, or systemd unit definitions. **For existing installations, updating the application code alone does not apply the `PrivateTmp=false` worker fix.** Update the worker systemd unit or apply an equivalent drop-in, then reload systemd and restart only the worker when safe. The web service should retain `PrivateTmp=true`.
+**Security:** This executes code from the repository's current `main` branch with root privileges. Only use it if you trust the repository and its maintainers. For reproducible deployments, download and inspect a tagged release instead. Keep a separate off-device backup of your `/mutable/tessentry/` data. This updater does not upgrade OS packages or FFmpeg. The bundled `update.sh` adds a worker systemd drop-in setting `PrivateTmp=no` and, if needed, an archive drop-in setting `SNAPSHOT_INTERVAL=300`. If the archive service already has an effective 300-second setting, the updater preserves it without restarting that service. The web service should retain `PrivateTmp=true`. A full fresh-install and failure-rollback test on a separate Pi is still recommended before production deployment.
