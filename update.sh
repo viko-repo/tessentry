@@ -152,8 +152,14 @@ fi
 echo 'Stopping Tessentry services for a consistent data backup...'
 STOP_ATTEMPTED=1
 systemctl stop tessentry-worker.service tessentry-web.service
-systemctl is-active --quiet tessentry-worker.service && { echo 'Worker still active' >&2; exit 1; } || true
-systemctl is-active --quiet tessentry-web.service && { echo 'Web still active' >&2; exit 1; } || true
+# Never take a live SQLite backup if either service is still running.
+for svc in tessentry-worker.service tessentry-web.service; do
+  state="$(systemctl show "$svc" -p ActiveState --value)"
+  if [[ "$state" != inactive ]]; then
+    echo "ERROR: $svc did not stop cleanly (ActiveState=$state); aborting backup." >&2
+    exit 1
+  fi
+done
 
 echo 'Backing up persistent state while Tessentry is stopped...'
 tar -czf "$STATE_BACKUP" \
