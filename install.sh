@@ -284,6 +284,15 @@ fi
 
 echo "Enabling Tessentry services..."
 
+echo 'Configuring web network readiness...'
+WEB_OVERRIDE=/etc/systemd/system/tessentry-web.service.d/10-wait-tailscale.conf
+install -d -m 755 "$(dirname "$WEB_OVERRIDE")"
+cat >"$WEB_OVERRIDE" <<'UNIT'
+[Service]
+ExecStartPre=/bin/sh -c 'case "$$TESSENTRY_BIND" in 127.*|0.0.0.0) exit 0;; esac; i=0; until /usr/sbin/ip -o -4 addr show | /usr/bin/grep -Fq "inet $$TESSENTRY_BIND/"; do i=$$((i+1)); if [ "$$i" -ge 60 ]; then echo "Tessentry bind IP not ready after 60 seconds"; exit 1; fi; /usr/bin/sleep 1; done'
+UNIT
+chmod 644 "$WEB_OVERRIDE"
+
 systemctl daemon-reload
 
 systemctl enable tessentry-worker.service tessentry-web.service

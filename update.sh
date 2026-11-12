@@ -40,6 +40,8 @@ ARCHIVE_SERVICE=sentryusb-archive.service
 ARCHIVE_OVERRIDE=/etc/systemd/system/sentryusb-archive.service.d/50-tessentry-snapshot-interval.conf
 WORKER_BACKUP="$BACKUP_DIR/worker-$STAMP.conf"
 ARCHIVE_BACKUP="$BACKUP_DIR/archive-$STAMP.conf"
+WEB_OVERRIDE=/etc/systemd/system/tessentry-web.service.d/10-wait-tailscale.conf
+WEB_BACKUP="$BACKUP_DIR/web-$STAMP.conf"
 
 ROOT_WAS_RO=0
 [[ ",$(findmnt -no OPTIONS /)," == *,ro,* ]] && ROOT_WAS_RO=1
@@ -49,8 +51,10 @@ OLD_MOVED=0
 NEW_INSTALLED=0
 WORKER_CHANGED=0
 ARCHIVE_CHANGED=0
+WEB_CHANGED=0
 WORKER_EXISTED=0
 ARCHIVE_EXISTED=0
+WEB_EXISTED=0
 ARCHIVE_WAS_ACTIVE=0
 SUCCESS=0
 
@@ -84,7 +88,14 @@ cleanup() {
         rm -f "$ARCHIVE_OVERRIDE" || rc=1
       fi
     fi
-    if (( WORKER_CHANGED || ARCHIVE_CHANGED )); then
+    if (( WEB_CHANGED )); then
+      if (( WEB_EXISTED )); then
+        cp -a "$WEB_BACKUP" "$WEB_OVERRIDE" || rc=1
+      else
+        rm -f "$WEB_OVERRIDE" || rc=1
+      fi
+    fi
+    if (( WORKER_CHANGED || ARCHIVE_CHANGED || WEB_CHANGED )); then
       systemctl daemon-reload || rc=1
     fi
     if (( STOP_ATTEMPTED )); then
@@ -140,6 +151,11 @@ if [[ -f "$WORKER_OVERRIDE" ]]; then
   chmod 600 "$WORKER_BACKUP"
   WORKER_EXISTED=1
 fi
+if [[ -f "$WEB_OVERRIDE" ]]; then
+  cp -a "$WEB_OVERRIDE" "$WEB_BACKUP"
+  chmod 600 "$WEB_BACKUP"
+  WEB_EXISTED=1
+fi
 if systemctl cat "$ARCHIVE_SERVICE" >/dev/null 2>&1; then
   if [[ -f "$ARCHIVE_OVERRIDE" ]]; then
     cp -a "$ARCHIVE_OVERRIDE" "$ARCHIVE_BACKUP"
@@ -183,6 +199,15 @@ cat >"$WORKER_OVERRIDE" <<'UNIT'
 PrivateTmp=no
 UNIT
 chmod 644 "$WORKER_OVERRIDE"
+
+echo 'Configuring web network readiness...'
+install -d -m 755 "$(dirname "$WEB_OVERRIDE")"
+WEB_CHANGED=1
+cat >"$WEB_OVERRIDE" <<'UNIT'
+[Service]
+ExecStartPre=/bin/sh -c 'case "$$TESSENTRY_BIND" in 127.*|0.0.0.0) exit 0;; esac; i=0; until /usr/sbin/ip -o -4 addr show | /usr/bin/grep -Fq "inet $$TESSENTRY_BIND/"; do i=$$((i+1)); if [ "$$i" -ge 60 ]; then echo "Tessentry bind IP not ready after 60 seconds"; exit 1; fi; /usr/bin/sleep 1; done'
+UNIT
+chmod 644 "$WEB_OVERRIDE"
 
 if systemctl cat "$ARCHIVE_SERVICE" >/dev/null 2>&1; then
   if systemctl show "$ARCHIVE_SERVICE" -p Environment --value |
