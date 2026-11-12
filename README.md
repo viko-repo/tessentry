@@ -53,6 +53,10 @@ sudo bash install.sh
 
 The installer checks that `/mutable` is writable, temporarily makes the root filesystem writable when needed, installs FFmpeg if required, installs Tessentry and its systemd services, configures the archive snapshot interval if needed, and attempts to restore the original read-only state. It prints a generated administrator password on first installation; **save it securely**. Existing configuration and password are retained on subsequent installations.
 
+**Tailscale startup readiness:** Tessentry requires an active Tailscale IPv4 address during installation. The installer creates a systemd drop-in at `/etc/systemd/system/tessentry-web.service.d/10-wait-tailscale.conf`. On startup, the web service waits up to 60 seconds for its configured IP address to become available before launching. If the address is still unavailable, systemd retries the service according to its restart policy. The updater applies the same network-readiness configuration to existing installations and backs up the previous drop-in for rollback.
+
+This prevents the web interface from failing immediately when Tailscale assigns its address after the service starts. The web interface remains bound to its configured address rather than being exposed on all network interfaces.
+
 > **Installation status:** The v1.3.0 fresh installer and failure rollback paths have not yet been independently validated on a separate Pi. Use a backup and review the installer before deployment.
 
 ### Step 5 — Configure and enable monitoring
